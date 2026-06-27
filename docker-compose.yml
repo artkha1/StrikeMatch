@@ -1,0 +1,103 @@
+x-airflow-common:
+  &airflow-common
+  build:
+    context: .
+    dockerfile: Dockerfile.airflow
+  environment:
+    &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-db:5432/airflow
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+    PYTHONUNBUFFERED: "1"
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - .:/opt/pipeline:ro
+    - airflow_logs:/opt/airflow/logs
+  depends_on:
+    &airflow-common-depends-on
+    airflow-db:
+      condition: service_healthy
+
+services:
+  # ── Pipeline data (PostGIS) ──────────────────────────────────────────────────
+  db:
+    image: postgis/postgis:16-3.4
+    environment:
+      POSTGRES_DB: satellite_tracking
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ── Airflow metadata DB (separate from pipeline data) ────────────────────────
+  airflow-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: airflow
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+    volumes:
+      - airflow_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ── One-shot init: migrate schema + create admin user ───────────────────────
+  airflow-init:
+    <<: *airflow-common
+    depends_on:
+      <<: *airflow-common-depends-on
+      db:
+        condition: service_healthy
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_DB_MIGRATE: "true"
+      _AIRFLOW_WWW_USER_CREATE: "true"
+      _AIRFLOW_WWW_USER_USERNAME: admin
+      _AIRFLOW_WWW_USER_PASSWORD: admin
+    command: version
+
+  # ── Scheduler: executes tasks via LocalExecutor (subprocesses) ──────────────
+  airflow-scheduler:
+    <<: *airflow-common
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+    # Pipeline secrets (DATABASE_URL pointing to 'db', FIRMS_MAP_KEY).
+    # See airflow.env (copy from .airflow.env.example and fill in values).
+    env_file: .airflow.env
+    command: scheduler
+    restart: unless-stopped
+
+  # ── Webserver: Airflow UI at http://localhost:8080 (admin/admin) ─────────────
+  airflow-webserver:
+    <<: *airflow-common
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+    ports:
+      - "8080:8080"
+    command: webserver
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+volumes:
+  pgdata:
+  airflow_pgdata:
+  airflow_logs:

@@ -1,0 +1,9 @@
+psycopg2-binary>=2.9
+requests>=2.31
+python-dotenv>=1.0
+pyspark>=3.5
+# Databricks migration (Phase 4 on Free Edition)
+pandas>=2.0
+pyarrow>=15.0
+databricks-sdk>=0.30
+databricks-sql-connector>=3.0
