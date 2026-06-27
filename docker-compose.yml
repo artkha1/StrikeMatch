@@ -10,6 +10,7 @@ x-airflow-common:
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
     AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
     PYTHONUNBUFFERED: "1"
+    DATABASE_URL: postgresql://postgres:postgres@db:5432/satellite_tracking
   volumes:
     - ./dags:/opt/airflow/dags
     - .:/opt/pipeline:ro
@@ -74,9 +75,8 @@ services:
       <<: *airflow-common-depends-on
       airflow-init:
         condition: service_completed_successfully
-    # Pipeline secrets (DATABASE_URL pointing to 'db', FIRMS_MAP_KEY).
-    # See airflow.env (copy from .airflow.env.example and fill in values).
-    env_file: .airflow.env
+    # Pipeline secrets — shared .env; DATABASE_URL is overridden above to use 'db' hostname.
+    env_file: .env
     command: scheduler
     restart: unless-stopped
 

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 FIRMS VIIRS I-Band 375m NRT -> PostGIS ingestion.
-Phase 1 per SPEC.md: fetch 7-day global, filter low-confidence, dedup, insert.
+Fetch the rolling window (RU/UA + Middle East), filter low-confidence, dedup, insert.
+Design notes (source, filter, dedup) in CLAUDE.md.
 
 Usage:
     python firms_ingest.py
@@ -27,61 +28,48 @@ DB_DSN: str = os.environ.get(
     "postgresql://postgres:postgres@localhost:5432/satellite_tracking",
 )
 FIRMS_BASE = "https://firms.modaps.eosdis.nasa.gov/api/area/csv"
-VIIRS_SOURCES = ["VIIRS_SNPP_NRT", "VIIRS_NOAA20_NRT"]  # NOAA-21 omitted: near-identical orbit to NOAA-20, marginal gain for 84h correlation window
-LOOKBACK_DAYS = 7
+# Shift the rolling window back to stay in sync with ACLED's data lag.
+# Set DATA_LAG_DAYS in .env. 0 for paid/real-time access (default).
+DATA_LAG_DAYS = int(os.environ.get("DATA_LAG_DAYS", "0"))
+LOOKBACK_DAYS = 14
+
+# NRT products serve only the most recent ~10 days; for historical queries use the
+# Standard Processing (SP) archive products, which cover the full VIIRS mission.
+if DATA_LAG_DAYS > 10:
+    VIIRS_SOURCES = ["VIIRS_SNPP_SP", "VIIRS_NOAA20_SP"]
+else:
+    VIIRS_SOURCES = ["VIIRS_SNPP_NRT", "VIIRS_NOAA20_NRT"]  # NOAA-21 omitted: near-identical orbit to NOAA-20
 # API hard-caps at 5 days per request for global bbox; chunk accordingly.
 MAX_DAYS_PER_REQUEST = 5
 
 # Regional bounding boxes sent directly to the FIRMS API (format: "W,S,E,N").
 # One request per region per VIIRS source instead of a single global pull.
-# Unioning the CONFLICT_COUNTRIES from gdelt_ingest.py into 8 geographic clusters.
-# Keep in sync whenever CONFLICT_COUNTRIES is updated.
+# Scope: Russia/Ukraine theater + Middle East theater (matches ACLED_COUNTRIES in acled_ingest.py).
 # Per-country bounding boxes (min_lat, max_lat, min_lon, max_lon) used as a
 # post-download filter to drop fires from non-conflict countries that fall inside
-# a regional bbox (e.g. Tunisia inside "North Africa", Greece inside "Middle East").
-# Keep in sync with CONFLICT_COUNTRIES in gdelt_ingest.py.
+# a regional bbox (e.g. Greece inside "Eastern Europe / Russia").
+# Keep in sync with ACLED_COUNTRIES in acled_ingest.py.
 COUNTRY_BBOXES: dict[str, tuple[float, float, float, float]] = {
-    "UP": (44.0,  52.5,  22.0,  40.5),
-    "RS": (41.0,  82.0,  19.0, 180.0),
-    "IS": (29.0,  33.5,  34.0,  36.0),
-    "GZ": (31.2,  31.6,  34.2,  34.6),
-    "WE": (31.3,  32.6,  34.8,  35.6),
-    "SY": (32.5,  37.5,  35.5,  42.5),
-    "IZ": (29.0,  38.0,  38.5,  48.5),
-    "YM": (12.0,  19.0,  42.5,  55.0),
-    "LE": (33.0,  34.7,  35.0,  36.7),
-    "IR": (25.0,  40.0,  44.0,  64.0),
-    "TU": (35.8,  42.5,  25.5,  44.5),
-    "QA": (24.5,  26.5,  50.5,  51.7),
-    "KU": (28.5,  30.2,  46.5,  48.5),
-    "SA": (16.0,  32.0,  34.5,  55.5),
-    "BA": (25.5,  26.5,  50.3,  50.8),
-    "MU": (16.5,  26.5,  52.0,  60.0),
-    "JO": (29.0,  33.5,  34.5,  39.5),
-    "AE": (22.5,  26.0,  51.0,  56.5),
-    "LY": (19.5,  33.5,   9.0,  25.5),
-    "SU": ( 8.5,  23.0,  21.5,  39.0),
-    "EG": (21.5,  31.8,  24.5,  37.0),
-    "ET": ( 3.5,  15.0,  33.0,  48.0),
-    "SO": (-2.0,  12.0,  40.5,  51.5),
-    "KE": (-4.7,   5.0,  33.5,  42.0),
-    "DJ": (10.9,  12.7,  41.7,  43.5),
-    "RW": (-2.9,  -1.0,  28.8,  30.9),
-    "UG": (-1.5,   4.2,  29.5,  35.1),
-    "OD": ( 3.5,  12.2,  24.0,  36.0),
-    "CG": (-13.5,  5.5,  12.0,  31.5),
-    "CT": ( 2.2,  11.0,  14.4,  27.5),
-    "CD": ( 7.5,  23.5,  13.5,  24.0),
-    "MZ": (-26.9, -10.3, 32.5,  40.9),
-    "ML": (10.0,  25.0,  -4.5,   4.5),
-    "NG": (11.5,  23.5,   0.0,  16.0),
-    "NI": ( 4.0,  14.0,   2.5,  15.0),
-    "CM": ( 1.5,  13.1,   8.4,  16.2),
-    "AF": (29.0,  39.0,  60.0,  75.0),
-    "PK": (23.5,  37.5,  60.5,  77.5),
-    "BM": ( 9.5,  28.5,  92.0, 101.5),
-    "HA": (18.0,  20.2, -74.5, -71.6),
-    "CO": (-4.3,  13.0, -79.0, -66.5),
+    # Russia/Ukraine theater
+    "UP": (44.0,  52.5,  22.0,  40.5),   # Ukraine
+    "RS": (41.0,  82.0,  19.0, 180.0),   # Russia
+    # Middle East theater
+    "IS": (29.0,  33.5,  34.0,  36.0),   # Israel
+    "GZ": (31.2,  31.6,  34.2,  34.6),   # Gaza Strip
+    "WE": (31.3,  32.6,  34.8,  35.6),   # West Bank
+    "SY": (32.5,  37.5,  35.5,  42.5),   # Syria
+    "IZ": (29.0,  38.0,  38.5,  48.5),   # Iraq
+    "YM": (12.0,  19.0,  42.5,  55.0),   # Yemen
+    "LE": (33.0,  34.7,  35.0,  36.7),   # Lebanon
+    "IR": (25.0,  40.0,  44.0,  64.0),   # Iran
+    "TU": (35.8,  42.5,  25.5,  44.5),   # Turkey
+    "QA": (24.5,  26.5,  50.5,  51.7),   # Qatar
+    "KU": (28.5,  30.2,  46.5,  48.5),   # Kuwait
+    "SA": (16.0,  32.0,  34.5,  55.5),   # Saudi Arabia
+    "BA": (25.5,  26.5,  50.3,  50.8),   # Bahrain
+    "MU": (16.5,  26.5,  52.0,  60.0),   # Oman
+    "JO": (29.0,  33.5,  34.5,  39.5),   # Jordan
+    "AE": (22.5,  26.0,  51.0,  56.5),   # UAE
 }
 
 
@@ -97,14 +85,6 @@ REGION_BBOXES: list[tuple[str, str]] = [
     ("Eastern Europe / Russia",  "19,41,180,82"),   # Ukraine, Russia
     ("Middle East",              "25,12,64,43"),    # Israel/Gaza/WB, Lebanon, Syria, Iraq,
                                                     # Yemen, Iran, Turkey, Gulf states, Jordan
-    ("North Africa",             "9,8,40,34"),      # Libya, Sudan, Egypt
-    ("East Africa",              "24,-3,52,15"),    # Ethiopia, Somalia, Kenya, Djibouti,
-                                                    # Rwanda, Uganda, South Sudan
-    ("Central & West Africa",    "-5,-27,41,26"),   # DR Congo, CAR, Chad, Mozambique,
-                                                    # Mali, Niger, Nigeria, Cameroon
-    ("South & Central Asia",     "60,23,78,39"),    # Afghanistan, Pakistan
-    ("Southeast Asia",           "92,9,102,29"),    # Myanmar
-    ("Americas",                 "-80,-5,-66,21"),  # Haiti, Colombia
 ]
 
 SCHEMA_SQL = (pathlib.Path(__file__).parent / "schema.sql").read_text()
@@ -279,8 +259,10 @@ def verify(conn: "psycopg2.connection") -> None:
 # -- Main ----------------------------------------------------------------------
 
 def main() -> None:
-    today = date.today()
-    print(f"Fetching FIRMS VIIRS 375m NRT (7-day, {len(REGION_BBOXES)} conflict regions, ending {today})...")
+    today = date.today() - timedelta(days=DATA_LAG_DAYS)
+    product_type = "SP (archive)" if DATA_LAG_DAYS > 10 else "NRT"
+    lag_note = f"  (lag={DATA_LAG_DAYS}d, real date {date.today()})" if DATA_LAG_DAYS else ""
+    print(f"Fetching FIRMS VIIRS 375m {product_type} ({LOOKBACK_DAYS}-day, {len(REGION_BBOXES)} regions, ending {today}{lag_note})...")
 
     tasks = [
         (src, bbox, label)

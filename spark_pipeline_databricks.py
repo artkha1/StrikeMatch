@@ -7,7 +7,7 @@ Job task (or notebook). The spatial/temporal transform is identical — the same
 Spark-column Haversine logic — but all Postgres/PostGIS I/O is replaced with Delta:
 
   bronze   workspace.fire_pipeline.firms_detections   (loaded from Parquet on a UC Volume)
-           workspace.fire_pipeline.gdelt_events        (loaded from Parquet on a UC Volume)
+           workspace.fire_pipeline.acled_events        (loaded from Parquet on a UC Volume)
   silver   workspace.fire_pipeline.firms_silver        (overwritten each run)
   gold     workspace.fire_pipeline.fire_event_correlations (MERGE upsert)
            workspace.fire_pipeline.gold_fire_event_map (serving view for Power BI)
@@ -27,7 +27,7 @@ Config via environment / Databricks job parameters (all have defaults):
 """
 
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
@@ -47,16 +47,20 @@ VOLUME_INBOUND = os.environ.get(
 
 _NS = f"`{CATALOG}`.`{SCHEMA}`"
 T_FIRMS_BRONZE = f"{_NS}.firms_detections"
-T_GDELT_BRONZE = f"{_NS}.gdelt_events"
+T_ACLED_BRONZE = f"{_NS}.acled_events"
 T_FIRMS_SILVER = f"{_NS}.firms_silver"
 T_CORR_GOLD = f"{_NS}.fire_event_correlations"
 V_GOLD_MAP = f"{_NS}.gold_fire_event_map"
 
 # Parquet drop locations on the Volume (written by export_bronze.py).
 P_FIRMS = f"{VOLUME_INBOUND}/firms_detections"
-P_GDELT = f"{VOLUME_INBOUND}/gdelt_events"
+P_ACLED = f"{VOLUME_INBOUND}/acled_events"
 
-LOOKBACK_DAYS = 7
+LOOKBACK_DAYS = 14
+# No DATA_LAG_DAYS here. Unlike spark_pipeline.py (which runs locally and shares the
+# ingest .env), this job derives its window from the data itself — see load_bronze() /
+# _windowed(). So ACLED's free-tier lag is configured only locally (ingest + export);
+# the Databricks job needs no lag setting at all.
 
 # Dedup constants (identical to spark_pipeline.py)
 _6H_S = 21_600     # 6 hours in seconds
@@ -161,12 +165,12 @@ def satellite_pass_dedup(df: DataFrame) -> DataFrame:
     return df.join(_dominated_ids(df), on="id", how="left_anti")
 
 
-# ── FIRMS × GDELT candidate join (verbatim scoring from spark_pipeline.py) ───────
+# ── FIRMS × ACLED candidate join ───────────────────────────────────────────────
 
-def compute_candidates(firms_silver: DataFrame, gdelt: DataFrame) -> DataFrame:
+def compute_candidates(firms_silver: DataFrame, acled: DataFrame) -> DataFrame:
     """
-    Many-to-many spatial-temporal join: FIRMS × GDELT within 25 km and [-72 h, +12 h].
-    Score formula is the calibrated 5-factor multiplicative product (SPEC.md).
+    Many-to-many spatial-temporal join: FIRMS × ACLED within 25 km and [-72 h, +12 h].
+    Score formula is the calibrated 5-factor multiplicative product (see CLAUDE.md).
     Denormalized fire/event coordinates are included so gold rows are self-contained.
     """
     f = firms_silver.select(
@@ -177,13 +181,14 @@ def compute_candidates(firms_silver: DataFrame, gdelt: DataFrame) -> DataFrame:
         F.col("frp"),
         F.col("confidence"),
     )
-    g = gdelt.select(
-        F.col("id").alias("gdelt_event_id"),
+    g = acled.select(
+        F.col("id").alias("acled_event_id"),
         F.col("event_datetime").alias("g_dt"),
         F.col("latitude").alias("g_lat"),
         F.col("longitude").alias("g_lon"),
         F.col("num_sources"),
-        F.col("cameo_code").alias("event_cameo_code"),
+        F.col("sub_event_type").alias("event_sub_event_type"),
+        F.col("description").alias("event_description"),
         F.col("action_geo_fullname").alias("event_fullname"),
         F.col("source_url").alias("event_source_url"),
     )
@@ -232,7 +237,7 @@ def compute_candidates(firms_silver: DataFrame, gdelt: DataFrame) -> DataFrame:
 
     return scored.select(
         "firms_detection_id",
-        "gdelt_event_id",
+        "acled_event_id",
         F.col("f_lat").alias("fire_lat"),
         F.col("f_lon").alias("fire_lon"),
         F.col("f_dt").alias("fire_acq_datetime"),
@@ -241,7 +246,8 @@ def compute_candidates(firms_silver: DataFrame, gdelt: DataFrame) -> DataFrame:
         F.col("g_lat").alias("event_lat"),
         F.col("g_lon").alias("event_lon"),
         F.col("g_dt").alias("event_datetime"),
-        "event_cameo_code",
+        "event_sub_event_type",
+        "event_description",
         "event_fullname",
         "event_source_url",
         F.col("num_sources").alias("event_num_sources"),
@@ -271,13 +277,14 @@ def ensure_namespace() -> None:
         ) USING DELTA
     """)
     spark.sql(f"""
-        CREATE TABLE IF NOT EXISTS {T_GDELT_BRONZE} (
-            id BIGINT, global_event_id BIGINT,
+        CREATE TABLE IF NOT EXISTS {T_ACLED_BRONZE} (
+            id BIGINT, global_event_id STRING,
             event_date DATE, event_datetime TIMESTAMP,
-            cameo_code STRING, cameo_root SMALLINT, goldstein_scale FLOAT,
-            num_mentions INT, num_sources INT, avg_tone FLOAT,
+            event_type STRING, sub_event_type STRING, description STRING,
+            num_sources INT,
             actor1_name STRING, actor2_name STRING,
-            action_geo_type SMALLINT, action_geo_fullname STRING, action_geo_country STRING,
+            action_geo_fullname STRING, action_geo_country STRING,
+            fatalities INT,
             latitude DOUBLE, longitude DOUBLE, source_url STRING, ingested_at TIMESTAMP
         ) USING DELTA
     """)
@@ -292,12 +299,12 @@ def ensure_namespace() -> None:
     """)
     spark.sql(f"""
         CREATE TABLE IF NOT EXISTS {T_CORR_GOLD} (
-            firms_detection_id BIGINT, gdelt_event_id BIGINT,
+            firms_detection_id BIGINT, acled_event_id BIGINT,
             fire_lat DOUBLE, fire_lon DOUBLE, fire_acq_datetime TIMESTAMP,
             fire_frp FLOAT, fire_confidence STRING,
             event_lat DOUBLE, event_lon DOUBLE, event_datetime TIMESTAMP,
-            event_cameo_code STRING, event_fullname STRING,
-            event_source_url STRING, event_num_sources INT,
+            event_sub_event_type STRING, event_description STRING,
+            event_fullname STRING, event_source_url STRING, event_num_sources INT,
             distance_m FLOAT, time_delta_h FLOAT, score FLOAT,
             created_at TIMESTAMP
         ) USING DELTA
@@ -310,7 +317,7 @@ def merge_bronze(src: DataFrame, target: str, key: str) -> int:
     """
     MERGE Parquet rows into a bronze Delta table on a natural key, inserting only
     new rows. Mirrors the append-only / NOT-EXISTS bronze semantics of the Postgres
-    ingest, and makes re-running the same 7-day window idempotent.
+    ingest, and makes re-running the same 14-day window idempotent.
     """
     view = f"_src_{key}"
     src.createOrReplaceTempView(view)
@@ -323,18 +330,34 @@ def merge_bronze(src: DataFrame, target: str, key: str) -> int:
     return spark.table(view).count()
 
 
-def load_bronze(cutoff: datetime) -> tuple[DataFrame, DataFrame]:
-    ts = cutoff.replace(tzinfo=None)
+def _windowed(table: str, time_col: str) -> DataFrame:
+    """
+    Return the latest LOOKBACK_DAYS of `table`, anchored on the max timestamp present
+    in the data — NOT wall-clock. This makes the job self-windowing: it processes
+    whatever export_bronze.py uploaded, regardless of how far ACLED's free Research
+    tier lags real-time. Consequence: the ACLED lag is set only locally (ingest +
+    export); the Databricks job needs no lag configuration.
+    """
+    tbl = spark.table(table)
+    max_ts = tbl.agg(F.max(time_col)).first()[0]
+    if max_ts is None:
+        return tbl  # empty bronze; verify() will fail the run with a clear message
+    cutoff = max_ts - timedelta(days=LOOKBACK_DAYS)
+    return tbl.filter(F.col(time_col) >= F.lit(cutoff))
+
+
+def load_bronze() -> tuple[DataFrame, DataFrame]:
     firms_in = spark.read.parquet(P_FIRMS)
-    gdelt_in = spark.read.parquet(P_GDELT)
+    acled_in = spark.read.parquet(P_ACLED)
 
     merge_bronze(firms_in, T_FIRMS_BRONZE, "id")
-    merge_bronze(gdelt_in, T_GDELT_BRONZE, "global_event_id")
+    merge_bronze(acled_in, T_ACLED_BRONZE, "global_event_id")
 
-    # Read back the 7-day window from bronze Delta (the canonical medallion source).
-    firms = spark.table(T_FIRMS_BRONZE).filter(F.col("acq_datetime") >= F.lit(ts))
-    gdelt = spark.table(T_GDELT_BRONZE).filter(F.col("event_datetime") >= F.lit(ts))
-    return firms, gdelt
+    # Read back the latest 14-day window from bronze Delta (the canonical medallion
+    # source), anchored on the data's own max timestamp.
+    firms = _windowed(T_FIRMS_BRONZE, "acq_datetime")
+    acled = _windowed(T_ACLED_BRONZE, "event_datetime")
+    return firms, acled
 
 
 # ── Silver / gold writes ────────────────────────────────────────────────────────
@@ -357,7 +380,7 @@ def write_silver(firms_silver: DataFrame) -> int:
 
 def write_gold(candidates: DataFrame) -> None:
     """
-    Historical-archive upsert: MERGE on (firms_detection_id, gdelt_event_id).
+    Historical-archive upsert: MERGE on (firms_detection_id, acled_event_id).
     Coordinates are denormalized into each gold row at insert time so the serving
     view never needs to join back to silver/bronze. This makes the archive immune
     to Postgres ID reuse: if bronze IDs are reassigned after a truncate, old gold
@@ -369,7 +392,7 @@ def write_gold(candidates: DataFrame) -> None:
         MERGE INTO {T_CORR_GOLD} AS t
         USING _corr_stage AS s
         ON  t.firms_detection_id = s.firms_detection_id
-        AND t.gdelt_event_id     = s.gdelt_event_id
+        AND t.acled_event_id     = s.acled_event_id
         WHEN NOT MATCHED THEN INSERT *
     """)
 
@@ -390,8 +413,8 @@ def build_serving_view() -> None:
                 'matched'          AS record_type,
                 firms_detection_id, fire_acq_datetime, fire_frp, fire_confidence,
                 fire_lat,  fire_lon,
-                gdelt_event_id,    event_datetime,     event_cameo_code,
-                event_fullname,    event_source_url,   event_num_sources,
+                acled_event_id,    event_datetime,     event_sub_event_type,
+                event_description, event_fullname,    event_source_url,   event_num_sources,
                 event_lat, event_lon,
                 distance_m, time_delta_h, score,
                 fire_lat AS map_lat, fire_lon AS map_lon
@@ -406,9 +429,10 @@ def build_serving_view() -> None:
                 f.confidence             AS fire_confidence,
                 f.latitude               AS fire_lat,
                 f.longitude              AS fire_lon,
-                CAST(NULL AS BIGINT)     AS gdelt_event_id,
+                CAST(NULL AS BIGINT)     AS acled_event_id,
                 CAST(NULL AS TIMESTAMP)  AS event_datetime,
-                CAST(NULL AS STRING)     AS event_cameo_code,
+                CAST(NULL AS STRING)     AS event_sub_event_type,
+                CAST(NULL AS STRING)     AS event_description,
                 CAST(NULL AS STRING)     AS event_fullname,
                 CAST(NULL AS STRING)     AS event_source_url,
                 CAST(NULL AS INT)        AS event_num_sources,
@@ -431,9 +455,10 @@ def build_serving_view() -> None:
                 CAST(NULL AS STRING)     AS fire_confidence,
                 CAST(NULL AS DOUBLE)     AS fire_lat,
                 CAST(NULL AS DOUBLE)     AS fire_lon,
-                g.id                     AS gdelt_event_id,
+                g.id                     AS acled_event_id,
                 g.event_datetime,
-                g.cameo_code             AS event_cameo_code,
+                g.sub_event_type         AS event_sub_event_type,
+                g.description            AS event_description,
                 g.action_geo_fullname    AS event_fullname,
                 g.source_url             AS event_source_url,
                 g.num_sources            AS event_num_sources,
@@ -444,8 +469,8 @@ def build_serving_view() -> None:
                 CAST(NULL AS FLOAT)      AS score,
                 g.latitude               AS map_lat,
                 g.longitude              AS map_lon
-            FROM {T_GDELT_BRONZE} g
-            LEFT ANTI JOIN {T_CORR_GOLD} c ON g.id = c.gdelt_event_id
+            FROM {T_ACLED_BRONZE} g
+            LEFT ANTI JOIN {T_CORR_GOLD} c ON g.id = c.acled_event_id
         )
         SELECT * FROM matched
         UNION ALL SELECT * FROM fire_only
@@ -488,7 +513,7 @@ def verify() -> None:
         .select(
             "score", "distance_m", "time_delta_h",
             "fire_lat", "fire_lon", "fire_frp", "fire_confidence",
-            "event_fullname", "event_cameo_code",
+            "event_fullname", "event_sub_event_type",
         )
         .limit(3)
         .collect()
@@ -499,7 +524,7 @@ def verify() -> None:
             print(
                 f"  score={r['score']:.4f}  dist={r['distance_m']:.0f}m  dt={r['time_delta_h']:+.1f}h  "
                 f"({r['fire_lat']:.3f},{r['fire_lon']:.3f})  frp={r['fire_frp'] or 0:.1f}  conf={r['fire_confidence']}  "
-                f"loc={r['event_fullname']}  cameo={r['event_cameo_code']}"
+                f"loc={r['event_fullname']}  sub_type={r['event_sub_event_type']}"
             )
 
     # Contract assertions — fail the job task on violation (mirrors _validate_pipeline).
@@ -514,18 +539,17 @@ def verify() -> None:
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    cutoff = datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)
     print(f"Phase 4 Databricks pipeline  |  catalog={CATALOG} schema={SCHEMA}")
-    print(f"  lookback >= {cutoff.isoformat()}")
+    print(f"  windowing: latest {LOOKBACK_DAYS}d present in bronze (data-anchored)")
 
     ensure_namespace()
 
     print("\nLoading bronze from Volume Parquet (MERGE into Delta)...")
-    firms_raw, gdelt_raw = load_bronze(cutoff)
+    firms_raw, acled_raw = load_bronze()
     n_firms_raw = firms_raw.count()
-    n_gdelt_raw = gdelt_raw.count()
-    print(f"  firms_detections : {n_firms_raw:,} rows (7-day window)")
-    print(f"  gdelt_events     : {n_gdelt_raw:,} rows (7-day window)")
+    n_acled_raw = acled_raw.count()
+    print(f"  firms_detections : {n_firms_raw:,} rows (14-day window)")
+    print(f"  acled_events     : {n_acled_raw:,} rows (14-day window)")
 
     print("\nApplying silver transform (confidence filter + satellite-pass dedup)...")
     firms_silver = satellite_pass_dedup(confidence_filter(firms_raw))
@@ -535,8 +559,14 @@ def main() -> None:
     print("\nWriting firms_silver (overwrite)...")
     print(f"  {write_silver(firms_silver):,} rows written")
 
-    print("\nComputing FIRMS x GDELT candidates (25 km / -72 h to +12 h)...")
-    candidates = compute_candidates(firms_silver, gdelt_raw)
+    # Read the persisted silver back so the candidate join reuses the materialized
+    # dedup result instead of recomputing the grid-bin explode + anti-join. Serverless
+    # has no .cache() (it triggers PERSIST TABLE), so the silver Delta table is the
+    # materialization point — the analogue of spark_pipeline.py's firms_silver.cache().
+    firms_silver = spark.table(T_FIRMS_SILVER)
+
+    print("\nComputing FIRMS x ACLED candidates (25 km / -72 h to +12 h)...")
+    candidates = compute_candidates(firms_silver, acled_raw)
     n_candidates = candidates.count()
     print(f"  {n_candidates:,} candidate pairs")
 

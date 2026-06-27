@@ -39,7 +39,8 @@ DB_DSN = os.environ.get(
 VOLUME_PATH = os.environ.get(
     "DATABRICKS_VOLUME_PATH", "/Volumes/workspace/fire_pipeline/bronze_inbound"
 ).rstrip("/")
-LOOKBACK_DAYS = 7
+LOOKBACK_DAYS = 14
+DATA_LAG_DAYS = int(os.environ.get("DATA_LAG_DAYS", "0"))
 
 # Columns to export — schema.sql minus the GEOGRAPHY geom column. The Databricks job
 # rebuilds nothing from geom; it works purely on latitude/longitude.
@@ -50,14 +51,13 @@ FIRMS_SQL = """
     FROM firms_detections
     WHERE acq_datetime >= %(cutoff)s
 """
-GDELT_SQL = """
+ACLED_SQL = """
     SELECT id, global_event_id, event_date, event_datetime,
-           cameo_code, cameo_root, goldstein_scale,
-           num_mentions, num_sources, avg_tone,
+           event_type, sub_event_type, description, num_sources,
            actor1_name, actor2_name,
-           action_geo_type, action_geo_fullname, action_geo_country,
-           latitude, longitude, source_url, ingested_at
-    FROM gdelt_events
+           action_geo_fullname, action_geo_country,
+           fatalities, latitude, longitude, source_url, ingested_at
+    FROM acled_events
     WHERE event_datetime >= %(cutoff)s
 """
 
@@ -82,20 +82,22 @@ def upload_parquet(w: WorkspaceClient, df: pd.DataFrame, subdir: str) -> str:
 
 
 def main() -> None:
-    cutoff = datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)
-    print(f"Exporting bronze  |  cutoff >= {cutoff.isoformat()}")
+    effective_now = datetime.now(timezone.utc) - timedelta(days=DATA_LAG_DAYS)
+    cutoff = effective_now - timedelta(days=LOOKBACK_DAYS)
+    lag_note = f"  (lag={DATA_LAG_DAYS}d)" if DATA_LAG_DAYS else ""
+    print(f"Exporting bronze  |  window [{cutoff.date()} → {effective_now.date()}]{lag_note}")
 
     with psycopg2.connect(DB_DSN) as conn:
         firms = export_table(conn, FIRMS_SQL, cutoff)
-        gdelt = export_table(conn, GDELT_SQL, cutoff)
+        acled = export_table(conn, ACLED_SQL, cutoff)
     print(f"  firms_detections : {len(firms):,} rows")
-    print(f"  gdelt_events     : {len(gdelt):,} rows")
+    print(f"  acled_events     : {len(acled):,} rows")
 
     # WorkspaceClient reads DATABRICKS_HOST / DATABRICKS_TOKEN from the environment.
     w = WorkspaceClient()
     print(f"\nUploading to Volume {VOLUME_PATH} ...")
     print(f"  {upload_parquet(w, firms, 'firms_detections')}")
-    print(f"  {upload_parquet(w, gdelt, 'gdelt_events')}")
+    print(f"  {upload_parquet(w, acled, 'acled_events')}")
     print("\nDone.")
 
 

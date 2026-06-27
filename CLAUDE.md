@@ -63,7 +63,6 @@ and stays as-is — only the conflict-event source feeding it changes.
 - **`spark_pipeline.py`** (local fallback) — same correlation / window changes for parity.
 - **`export_bronze.py`** — rename the `GDELT_SQL` query to `ACLED_SQL` and update its column list to the new `acled_events` schema.
 - **`dags/fire_event_pipeline.py`** — rename the `ingest_gdelt` task to run `acled_ingest.py`.
-- **`SPEC.md`** — update scope, source, strike filter, scoring-window note.
 - **Retired (keep in-repo, drop from DAG):** `gdelt_ingest.py` — reference/fallback only.
 
 ## Column mapping (ACLED → acled_events)
@@ -98,7 +97,6 @@ dbt, Great Expectations.
 - Power BI serves the gold layer from a Databricks serverless SQL warehouse
 - ACLED conflict-event source via OAuth API (replaces GDELT) — see Current Phase
 - NASA Earthdata token + ACLED OAuth credentials + Databricks PAT read from `.env` — never hardcode or commit them
-- Databricks migration runbook + Power BI wiring: see `DATABRICKS.md`
 
 ---
 
@@ -126,11 +124,26 @@ python acled_ingest.py          # fetch ACLED strike events (14-day, RU/UA+ME), 
 python spark_pipeline.py        # local fallback: dedup → firms_silver; correlate → fire_event_correlations
 ```
 
-### Databricks path (primary — Delta medallion, see DATABRICKS.md)
+### Databricks path (primary — Delta medallion)
 ```bash
 python export_bronze.py   # export 14-day bronze windows → Parquet → UC Volume (needs Databricks env)
 # then run the Databricks job (spark_pipeline_databricks.py) via Workflows UI or the DAG
 ```
+
+**Air gap:** Databricks Free Edition is serverless-only and cannot reach the local Postgres. Bronze
+crosses the gap as files: `export_bronze.py` writes Parquet (dropping PostGIS geom) and uploads to
+a Unity Catalog Volume over HTTPS; the Databricks job MERGEs that Parquet into Delta. Nothing
+connects back to the laptop.
+
+```
+Postgres ──export_bronze.py──► UC Volume Parquet ──Databricks job──► Delta medallion ──► SQL warehouse ──► Power BI
+```
+
+| File | Runs on | Role |
+|---|---|---|
+| `export_bronze.py` | laptop | Postgres 14-day windows → Parquet → UC Volume |
+| `spark_pipeline_databricks.py` | Databricks job | Parquet → bronze Delta → silver → gold + serving view |
+| `dags/fire_event_pipeline.py` | local Airflow | orchestrates ingest → export → trigger job → validate |
 
 ### Airflow UI
 - URL: http://localhost:8080 (credentials: admin/admin)
@@ -172,7 +185,7 @@ ingest_acled ─┘
 ```
 `export_bronze` ships the 14-day bronze windows to a UC Volume; `run_databricks_job`
 triggers `spark_pipeline_databricks.py` (Delta medallion); `validate_pipeline` queries
-the Databricks SQL warehouse. See `DATABRICKS.md`.
+the Databricks SQL warehouse.
 
 ### Tables
 Local Postgres holds bronze only; silver/gold are Delta in Databricks
@@ -213,7 +226,33 @@ ACLED's day-level *event* dates — not GDELT's publication time — and recalib
 Moscow / V2 Gukovo; the old 0.0199 Gukovo benchmark was GDELT-specific and will shift. Targets
 (revisit after recalibration): ≥0.020 alerting, ≥0.002 archival.
 
-**`.env` vs `.airflow.env`**
-`.env` — used by local script runs; DATABASE_URL points to `localhost:5432`.
-`.airflow.env` — loaded by the airflow-scheduler container; DATABASE_URL points
-to the Docker service name `db:5432`.
+| Component | Formula | Rationale |
+|---|---|---|
+| `frp_score` | `LEAST(frp/300, 1)` | 300 MW ≈ an extreme fire |
+| `conf_factor` | `1.0` high / `0.8` nominal | weight high-confidence detections up |
+| `source_credibility` | `LEAST(num_sources/3, 1)` | conflict reporting is 1–4 sources |
+| `proximity_decay` | `SQRT(1 − dist/25000)` | concave; gentler mid-range, 0 at 25 km |
+| `temporal_decay` | `1 − \|Δt_h\|/T` | linear, 0 at the window edge |
+
+**Match definition (FIRMS × ACLED)**
+A pair is valid when distance ≤ 25 km AND the event date falls within −72 h to +12 h of the
+fire detection. 25 km was sized to GDELT's city-centroid error; ACLED's `geo_precision` 1–2 is
+tighter, so this can be narrowed during recalibration. The +12 h buffer covers a fire seen on an
+overnight pass before its event is dated. Many-to-many: every valid pair is stored (one event ↔
+many fires and vice versa); consumers aggregate (e.g. `MAX(score)`).
+
+**FIRMS source & false-positive filter**
+VIIRS I-Band 375m only — NRT products (lag ~3 h), switching to the SP archive products when
+`DATA_LAG_DAYS > 10`. MODIS and VIIRS 750m are excluded (single schema). `confidence = 'low'`
+is dropped at ingest and never stored (agricultural burns and gas flares skew low-confidence);
+`nominal`/`high` are kept; FRP is stored, not thresholded.
+
+**Validation benchmarks (recalibration targets)**
+V1 Moscow Kapotnya (low-FRP — VIIRS missed the peak; a hard true positive) and V2 Gukovo oil
+depot (22.8 MW, high-confidence — the strongest true positive; must rank above V1). Under GDELT
+these scored 0.0019 / 0.0199; re-establish equivalents after retuning the ACLED day-level window.
+
+**`.env`**
+Single secrets file shared by local scripts and the Airflow container. `DATABASE_URL` in `.env`
+points to `localhost:5432` for local runs; the Airflow container overrides it to `db:5432` via
+a hardcoded env var in `docker-compose.yml` (`x-airflow-common-env`).

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Phase 4: PySpark bronze->silver transform + FIRMS<->GDELT candidate join.
+Phase 4: PySpark bronze->silver transform + FIRMS<->ACLED candidate join.
 
-Reads firms_detections and gdelt_events from Postgres, applies:
+Reads firms_detections and acled_events from Postgres, applies:
   1. Confidence filter  — drop 'l'/'low' rows (mirrors firms_ingest.py)
   2. Satellite-pass dedup — 1 km / ±6 h window via grid-bin equi-join
   3. FIRMS × GDELT join  — 25 km / -72 h to +12 h, score computation
@@ -64,7 +64,8 @@ DB_DSN: str = os.environ.get(
     "DATABASE_URL",
     "postgresql://postgres:postgres@localhost:5432/satellite_tracking",
 )
-LOOKBACK_DAYS = 7
+LOOKBACK_DAYS = 14
+DATA_LAG_DAYS = int(os.environ.get("DATA_LAG_DAYS", "0"))
 SCHEMA_SQL = (pathlib.Path(__file__).parent / "schema.sql").read_text()
 
 # Staging table names (Spark writes here; psycopg2 copies to targets)
@@ -147,11 +148,11 @@ def read_firms(spark: SparkSession, url: str, props: dict, cutoff: datetime) -> 
     )
 
 
-def read_gdelt(spark: SparkSession, url: str, props: dict, cutoff: datetime) -> DataFrame:
+def read_acled(spark: SparkSession, url: str, props: dict, cutoff: datetime) -> DataFrame:
     ts = cutoff.strftime("%Y-%m-%d %H:%M:%S+00")
     return spark.read.jdbc(
         url=url,
-        table="gdelt_events",
+        table="acled_events",
         predicates=[f"event_datetime >= '{ts}'"],
         properties=props,
     )
@@ -263,15 +264,15 @@ def satellite_pass_dedup(df: DataFrame) -> DataFrame:
     return df.join(dominated_ids, on="id", how="left_anti")
 
 
-# ── FIRMS × GDELT candidate join ───────────────────────────────────────────────
+# ── FIRMS × ACLED candidate join ───────────────────────────────────────────────
 
-def compute_candidates(firms_silver: DataFrame, gdelt: DataFrame) -> DataFrame:
+def compute_candidates(firms_silver: DataFrame, acled: DataFrame) -> DataFrame:
     """
-    Many-to-many spatial-temporal join: FIRMS × GDELT within 25 km and [-72 h, +12 h].
+    Many-to-many spatial-temporal join: FIRMS × ACLED within 25 km and [-72 h, +12 h].
 
-    GDELT is broadcast (small after ingest-time filtering to 39 countries + city-level
-    + CAMEO 190x/193x/195x for 7 days — typically ≪ FIRMS global volume).
-    If GDELT grows beyond ~200 MB, remove the broadcast() hint and let Spark choose
+    ACLED is broadcast (small after ingest-time filtering to RU/UA+ME strike events
+    for 14 days — typically ≪ FIRMS volume).
+    If ACLED grows beyond ~200 MB, remove the broadcast() hint and let Spark choose
     a sort-merge join, or set spark.sql.autoBroadcastJoinThreshold.
 
     Two-phase spatial:
@@ -279,9 +280,9 @@ def compute_candidates(firms_silver: DataFrame, gdelt: DataFrame) -> DataFrame:
          Lat margin: 25 km ≈ 0.225°.  Lon margin: 0.225° / cos(lat), capped at 5°.
       2. Exact Haversine UDF on the reduced candidate set → keep ≤ 25 000 m.
 
-    Score formula matches correlate.py exactly (5-factor multiplicative product).
+    Score formula: 5-factor multiplicative product (see CLAUDE.md).
 
-    Semantic difference vs. correlate.py: the 7-day FIRMS window is fixed at job
+    Semantic difference vs. correlate.py: the 14-day FIRMS window is fixed at job
     start via a Python datetime rather than Postgres's per-statement NOW().  No
     practical difference for a daily batch job.
     """
@@ -293,8 +294,8 @@ def compute_candidates(firms_silver: DataFrame, gdelt: DataFrame) -> DataFrame:
         F.col("frp"),
         F.col("confidence"),
     )
-    g = gdelt.select(
-        F.col("id").alias("gdelt_event_id"),
+    g = acled.select(
+        F.col("id").alias("acled_event_id"),
         F.col("event_datetime").alias("g_dt"),
         F.col("latitude").alias("g_lat"),
         F.col("longitude").alias("g_lon"),
@@ -347,7 +348,7 @@ def compute_candidates(firms_silver: DataFrame, gdelt: DataFrame) -> DataFrame:
     )
 
     return scored.select(
-        "firms_detection_id", "gdelt_event_id", "distance_m", "time_delta_h", "score",
+        "firms_detection_id", "acled_event_id", "distance_m", "time_delta_h", "score",
     )
 
 
@@ -406,8 +407,8 @@ def write_correlations(candidates: DataFrame, url: str, props: dict) -> int:
 
     Spark can only do plain INSERT via JDBC; ON CONFLICT is not supported.
     Workaround: write to a staging table, then psycopg2 applies
-    ON CONFLICT (firms_detection_id, gdelt_event_id) DO NOTHING — identical to
-    the behaviour in correlate.py.  Staging table is dropped afterward.
+    ON CONFLICT (firms_detection_id, acled_event_id) DO NOTHING — idempotent upsert.
+    Staging table is dropped afterward.
     """
     (
         candidates
@@ -419,15 +420,15 @@ def write_correlations(candidates: DataFrame, url: str, props: dict) -> int:
         with conn.cursor() as cur:
             cur.execute(f"""
                 INSERT INTO fire_event_correlations
-                    (firms_detection_id, gdelt_event_id, distance_m, time_delta_h, score)
+                    (firms_detection_id, acled_event_id, distance_m, time_delta_h, score)
                 SELECT
                     firms_detection_id::bigint,
-                    gdelt_event_id::bigint,
+                    acled_event_id::bigint,
                     distance_m::real,
                     time_delta_h::real,
                     score::real
                 FROM {_STAGE_CORR}
-                ON CONFLICT (firms_detection_id, gdelt_event_id) DO NOTHING
+                ON CONFLICT (firms_detection_id, acled_event_id) DO NOTHING
             """)
             inserted = cur.rowcount
             cur.execute(f"DROP TABLE IF EXISTS {_STAGE_CORR}")
@@ -466,10 +467,10 @@ def verify() -> None:
             cur.execute("""
                 SELECT c.score, c.distance_m, c.time_delta_h,
                        f.latitude, f.longitude, f.frp, f.confidence,
-                       g.action_geo_fullname, g.cameo_code
+                       g.action_geo_fullname, g.sub_event_type
                 FROM fire_event_correlations c
                 JOIN firms_silver f ON f.id = c.firms_detection_id
-                JOIN gdelt_events g ON g.id = c.gdelt_event_id
+                JOIN acled_events g ON g.id = c.acled_event_id
                 ORDER BY c.score DESC
                 LIMIT 3
             """)
@@ -486,19 +487,21 @@ def verify() -> None:
     if top3:
         print("\nTop 3 by score:")
         for r in top3:
-            sc, dm, dh, lat, lon, frp, conf, loc, cameo = r
+            sc, dm, dh, lat, lon, frp, conf, loc, sub_type = r
             print(
                 f"  score={sc:.4f}  dist={dm:.0f}m  dt={dh:+.1f}h  "
                 f"({lat:.3f},{lon:.3f})  frp={frp or 0:.1f}  conf={conf}  "
-                f"loc={loc}  cameo={cameo}"
+                f"loc={loc}  sub_type={sub_type}"
             )
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    cutoff = datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)
-    print(f"Phase 4 PySpark pipeline  |  lookback >= {cutoff.isoformat()}")
+    effective_now = datetime.now(timezone.utc) - timedelta(days=DATA_LAG_DAYS)
+    cutoff = effective_now - timedelta(days=LOOKBACK_DAYS)
+    lag_note = f"  (lag={DATA_LAG_DAYS}d)" if DATA_LAG_DAYS else ""
+    print(f"Phase 4 PySpark pipeline  |  window [{cutoff.date()} to {effective_now.date()}]{lag_note}")
 
     # Ensure schema (creates firms_silver if it doesn't exist yet)
     with psycopg2.connect(DB_DSN) as conn:
@@ -513,11 +516,11 @@ def main() -> None:
     # 1. Read bronze tables
     print("\nReading bronze tables from Postgres...")
     firms_raw = read_firms(spark, url, props, cutoff).cache()
-    gdelt_raw = read_gdelt(spark, url, props, cutoff).cache()
+    acled_raw = read_acled(spark, url, props, cutoff).cache()
     n_firms_raw = firms_raw.count()
-    n_gdelt_raw = gdelt_raw.count()
+    n_acled_raw = acled_raw.count()
     print(f"  firms_detections : {n_firms_raw:,} rows")
-    print(f"  gdelt_events     : {n_gdelt_raw:,} rows")
+    print(f"  acled_events     : {n_acled_raw:,} rows")
 
     # 2. Silver transform (confidence filter + satellite-pass dedup)
     print("\nApplying silver transform...")
@@ -532,9 +535,9 @@ def main() -> None:
     written_silver = write_firms_silver(firms_silver, url, props)
     print(f"  {written_silver:,} rows written")
 
-    # 3. FIRMS × GDELT candidate join + write
-    print("\nComputing FIRMS x GDELT candidates (25 km / -72 h to +12 h)...")
-    candidates = compute_candidates(firms_silver, gdelt_raw)
+    # 3. FIRMS × ACLED candidate join + write
+    print("\nComputing FIRMS x ACLED candidates (25 km / -72 h to +12 h)...")
+    candidates = compute_candidates(firms_silver, acled_raw)
     n_candidates = candidates.count()
     print(f"  {n_candidates:,} candidate pairs")
 
