@@ -27,7 +27,6 @@ Config via environment / Databricks job parameters (all have defaults):
 """
 
 import os
-from datetime import timedelta
 
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
@@ -56,21 +55,20 @@ V_GOLD_MAP = f"{_NS}.gold_fire_event_map"
 P_FIRMS = f"{VOLUME_INBOUND}/firms_detections"
 P_ACLED = f"{VOLUME_INBOUND}/acled_events"
 
-LOOKBACK_DAYS = 14
-# No DATA_LAG_DAYS here. Unlike spark_pipeline.py (which runs locally and shares the
-# ingest .env), this job derives its window from the data itself — see load_bronze() /
-# _windowed(). So ACLED's free-tier lag is configured only locally (ingest + export);
-# the Databricks job needs no lag setting at all.
+# No LOOKBACK_DAYS or DATA_LAG_DAYS here. The Databricks job processes exactly what
+# export_bronze.py uploaded to the Volume — date scoping is done there (rolling window
+# or --all for archive runs). Reading back from Delta with a time filter would anchor
+# on the Delta table's max timestamp and silently exclude archive data.
 
 # Dedup constants (identical to spark_pipeline.py)
 _6H_S = 21_600     # 6 hours in seconds
 _1KM_M = 1_006.0   # 1 km + 0.6% for Haversine/WGS-84 meridional-radius divergence
 
 # Join constants (identical to spark_pipeline.py)
-_25KM_M = 25_000.0
-_72H_S = 72 * 3600
-_12H_S = 12 * 3600
-_SCORE_H = 84.0    # 72 + 12, denominator for temporal decay
+_25KM_M    = 25_000.0
+_48H_S     = 48 * 3600   # fire must be observed within 48 h of event midnight (same/next day)
+_6H_BUFFER = 6 * 3600    # small timezone buffer (ACLED event_date is local; FIRMS is UTC)
+_SCORE_H   = 54.0        # temporal-decay denominator = 48 + 6
 
 
 # ── Haversine (native Spark columns — no Python UDF subprocess) ────────────────
@@ -151,7 +149,7 @@ def _dominated_ids(df: DataFrame) -> DataFrame:
             F.abs(F.col("a.acq_datetime").cast("long") - F.col("b.acq_datetime").cast("long")),
         )
         .filter((F.col("dist_m") <= _1KM_M) & (F.col("time_diff_s") <= _6H_S))
-        .select(F.col("b.id").alias("id"))
+        .select(F.col("a.id").alias("id"))   # drop the older (lower-id) row, keep latest
         .distinct()
     )
 
@@ -199,12 +197,15 @@ def compute_candidates(firms_silver: DataFrame, acled: DataFrame) -> DataFrame:
         F.lit(5.0),  # cap at 5° for polar/high-latitude cases
     )
 
+    # Event midnight must be ≤ fire_time + 6h (timezone buffer) and ≥ fire_time - 48h.
+    # Positive time_delta_h beyond the buffer is excluded — ACLED records actual event
+    # date, not publication time, so events recorded well after the fire are spurious.
     bbox_joined = f.join(
         F.broadcast(g),
         (F.abs(F.col("f_lat") - F.col("g_lat")) <= lat_margin) &
         (F.abs(F.col("f_lon") - F.col("g_lon")) <= lon_margin) &
-        (F.col("g_dt").cast("long") >= F.col("f_dt").cast("long") - _72H_S) &
-        (F.col("g_dt").cast("long") <= F.col("f_dt").cast("long") + _12H_S),
+        (F.col("g_dt").cast("long") >= F.col("f_dt").cast("long") - _48H_S) &
+        (F.col("g_dt").cast("long") <= F.col("f_dt").cast("long") + _6H_BUFFER),
     )
 
     with_dist = (
@@ -330,22 +331,6 @@ def merge_bronze(src: DataFrame, target: str, key: str) -> int:
     return spark.table(view).count()
 
 
-def _windowed(table: str, time_col: str) -> DataFrame:
-    """
-    Return the latest LOOKBACK_DAYS of `table`, anchored on the max timestamp present
-    in the data — NOT wall-clock. This makes the job self-windowing: it processes
-    whatever export_bronze.py uploaded, regardless of how far ACLED's free Research
-    tier lags real-time. Consequence: the ACLED lag is set only locally (ingest +
-    export); the Databricks job needs no lag configuration.
-    """
-    tbl = spark.table(table)
-    max_ts = tbl.agg(F.max(time_col)).first()[0]
-    if max_ts is None:
-        return tbl  # empty bronze; verify() will fail the run with a clear message
-    cutoff = max_ts - timedelta(days=LOOKBACK_DAYS)
-    return tbl.filter(F.col(time_col) >= F.lit(cutoff))
-
-
 def load_bronze() -> tuple[DataFrame, DataFrame]:
     firms_in = spark.read.parquet(P_FIRMS)
     acled_in = spark.read.parquet(P_ACLED)
@@ -353,11 +338,11 @@ def load_bronze() -> tuple[DataFrame, DataFrame]:
     merge_bronze(firms_in, T_FIRMS_BRONZE, "id")
     merge_bronze(acled_in, T_ACLED_BRONZE, "global_event_id")
 
-    # Read back the latest 14-day window from bronze Delta (the canonical medallion
-    # source), anchored on the data's own max timestamp.
-    firms = _windowed(T_FIRMS_BRONZE, "acq_datetime")
-    acled = _windowed(T_ACLED_BRONZE, "event_datetime")
-    return firms, acled
+    # Return the Parquet data directly — export_bronze.py already handled date scoping
+    # (rolling window or --all for archive runs). Reading back from the Delta table with
+    # a time-window filter would anchor on the Delta's max timestamp and silently exclude
+    # archive rows that predate the rolling window.
+    return firms_in, acled_in
 
 
 # ── Silver / gold writes ────────────────────────────────────────────────────────
@@ -367,14 +352,17 @@ _FIRMS_SILVER_COLS = [
     "bright_ti4", "bright_ti5", "frp", "scan", "track",
     "satellite", "confidence", "daynight", "type", "version", "ingested_at",
 ]
+# Pandas exports these as float64 (DoubleType); existing Delta table schema is FLOAT (FloatType).
+# Delta saveAsTable rejects the mismatch even in overwrite mode — cast explicitly.
+_FIRMS_FLOAT_COLS = ["bright_ti4", "bright_ti5", "frp", "scan", "track"]
 
 
 def write_silver(firms_silver: DataFrame) -> int:
-    (
-        firms_silver.select(_FIRMS_SILVER_COLS)
-        .write.format("delta").mode("overwrite")
-        .saveAsTable(T_FIRMS_SILVER)
-    )
+    df = firms_silver.select(_FIRMS_SILVER_COLS)
+    for c in _FIRMS_FLOAT_COLS:
+        df = df.withColumn(c, F.col(c).cast(FloatType()))
+    df = df.withColumn("type", F.col("type").cast("smallint"))
+    df.write.format("delta").mode("overwrite").saveAsTable(T_FIRMS_SILVER)
     return spark.table(T_FIRMS_SILVER).count()
 
 
@@ -540,7 +528,7 @@ def verify() -> None:
 
 def main() -> None:
     print(f"Phase 4 Databricks pipeline  |  catalog={CATALOG} schema={SCHEMA}")
-    print(f"  windowing: latest {LOOKBACK_DAYS}d present in bronze (data-anchored)")
+    print(f"  source: Volume Parquet at {VOLUME_INBOUND} (date scope set by export_bronze.py)")
 
     ensure_namespace()
 
@@ -565,7 +553,7 @@ def main() -> None:
     # materialization point — the analogue of spark_pipeline.py's firms_silver.cache().
     firms_silver = spark.table(T_FIRMS_SILVER)
 
-    print("\nComputing FIRMS x ACLED candidates (25 km / -72 h to +12 h)...")
+    print("\nComputing FIRMS x ACLED candidates (25 km / event_midnight ±48 h / +6 h buffer)...")
     candidates = compute_candidates(firms_silver, acled_raw)
     n_candidates = candidates.count()
     print(f"  {n_candidates:,} candidate pairs")

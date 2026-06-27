@@ -5,9 +5,11 @@ Fetch the rolling window (RU/UA + Middle East), filter low-confidence, dedup, in
 Design notes (source, filter, dedup) in CLAUDE.md.
 
 Usage:
-    python firms_ingest.py
+    python firms_ingest.py                              # rolling 14-day window
+    python firms_ingest.py --start 2025-01-14 --end 2025-01-15  # archive range
 Requires FIRMS_MAP_KEY in .env (get one free at https://firms.modaps.eosdis.nasa.gov/api/)
 """
+import argparse
 import csv
 import os
 import pathlib
@@ -110,11 +112,11 @@ CREATE TEMP TABLE _stage (
 # Eliminate within-batch near-duplicates before inserting into firms_detections.
 # The NOT EXISTS check in INSERT_FROM_STAGE_SQL only compares against already-committed
 # rows, so it can't dedup within the batch itself (critical on a fresh/truncated table).
-# Keep the row with the smallest _rid in each 1km/6h cluster; same-fire cross-satellite
-# detections within the window collapse to one representative.
+# Keep the row with the largest _rid (latest detection) in each 1km/6h cluster so the
+# most temporally recent satellite pass survives — aligns with the silver dedup policy.
 _STAGE_SELF_DEDUP_SQL = """
-DELETE FROM _stage s2
-USING _stage s1
+DELETE FROM _stage s1
+USING _stage s2
 WHERE s1._rid < s2._rid
   AND ST_DWithin(s1.geom, s2.geom, 1000)
   AND ABS(EXTRACT(EPOCH FROM (s1.acq_datetime - s2.acq_datetime))) <= 21600
@@ -147,12 +149,12 @@ WHERE NOT EXISTS (
 
 # -- Fetch ---------------------------------------------------------------------
 
-def _date_chunks(today: date, days: int, max_per: int) -> list[tuple[date, int]]:
-    """Split [today-days+1 .. today] into (start_date, count) chunks."""
-    start = today - timedelta(days=days - 1)
+def _date_chunks(start: date, end: date, max_per: int) -> list[tuple[date, int]]:
+    """Split [start .. end] into (start_date, count) chunks."""
+    total = (end - start).days + 1
     chunks: list[tuple[date, int]] = []
     current = start
-    remaining = days
+    remaining = total
     while remaining > 0:
         count = min(remaining, max_per)
         chunks.append((current, count))
@@ -161,19 +163,19 @@ def _date_chunks(today: date, days: int, max_per: int) -> list[tuple[date, int]]
     return chunks
 
 
-def fetch_source(source: str, today: date, bbox: str) -> list[dict]:
-    chunks = _date_chunks(today, LOOKBACK_DAYS, MAX_DAYS_PER_REQUEST)
+def fetch_source(source: str, start: date, end: date, bbox: str) -> list[dict]:
+    chunks = _date_chunks(start, end, MAX_DAYS_PER_REQUEST)
     all_rows: list[dict] = []
     print(f"  {source}", end="", flush=True)
-    for start, count in chunks:
-        url = f"{FIRMS_BASE}/{FIRMS_MAP_KEY}/{source}/{bbox}/{count}/{start}/"
+    for chunk_start, count in chunks:
+        url = f"{FIRMS_BASE}/{FIRMS_MAP_KEY}/{source}/{bbox}/{count}/{chunk_start}/"
         with requests.get(url, timeout=(10, 300), stream=True) as resp:
             resp.raise_for_status()
             if "text/html" in resp.headers.get("Content-Type", ""):
                 raise ValueError(f"API returned HTML — check MAP key / product name")
             rows = list(csv.DictReader(resp.iter_lines(decode_unicode=True)))
             all_rows.extend(rows)
-        print(f" {start}+{count}d({len(rows):,})", end="", flush=True)
+        print(f" {chunk_start}+{count}d({len(rows):,})", end="", flush=True)
     print(f"  => {len(all_rows):,} total")
     return all_rows
 
@@ -258,20 +260,44 @@ def verify(conn: "psycopg2.connection") -> None:
 
 # -- Main ----------------------------------------------------------------------
 
+def _parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Ingest FIRMS VIIRS fire detections into Postgres.")
+    p.add_argument("--start", type=date.fromisoformat, metavar="YYYY-MM-DD",
+                   help="Archive start date (inclusive). Requires --end.")
+    p.add_argument("--end",   type=date.fromisoformat, metavar="YYYY-MM-DD",
+                   help="Archive end date (inclusive). Requires --start.")
+    args = p.parse_args()
+    if bool(args.start) != bool(args.end):
+        p.error("--start and --end must be used together")
+    return args
+
+
 def main() -> None:
-    today = date.today() - timedelta(days=DATA_LAG_DAYS)
-    product_type = "SP (archive)" if DATA_LAG_DAYS > 10 else "NRT"
-    lag_note = f"  (lag={DATA_LAG_DAYS}d, real date {date.today()})" if DATA_LAG_DAYS else ""
-    print(f"Fetching FIRMS VIIRS 375m {product_type} ({LOOKBACK_DAYS}-day, {len(REGION_BBOXES)} regions, ending {today}{lag_note})...")
+    args = _parse_args()
+
+    if args.start and args.end:
+        start_date, end_date = args.start, args.end
+        days_ago = (date.today() - start_date).days
+        viirs_sources = ["VIIRS_SNPP_SP", "VIIRS_NOAA20_SP"] if days_ago > 10 else ["VIIRS_SNPP_NRT", "VIIRS_NOAA20_NRT"]
+        product_type = "SP (archive)" if days_ago > 10 else "NRT"
+        print(f"Fetching FIRMS VIIRS 375m {product_type} [archive] ({start_date} to {end_date}, {len(REGION_BBOXES)} regions)...")
+    else:
+        today = date.today() - timedelta(days=DATA_LAG_DAYS)
+        start_date = today - timedelta(days=LOOKBACK_DAYS - 1)
+        end_date = today
+        viirs_sources = VIIRS_SOURCES
+        product_type = "SP (archive)" if DATA_LAG_DAYS > 10 else "NRT"
+        lag_note = f"  (lag={DATA_LAG_DAYS}d, real date {date.today()})" if DATA_LAG_DAYS else ""
+        print(f"Fetching FIRMS VIIRS 375m {product_type} ({LOOKBACK_DAYS}-day, {len(REGION_BBOXES)} regions, ending {end_date}{lag_note})...")
 
     tasks = [
         (src, bbox, label)
         for label, bbox in REGION_BBOXES
-        for src in VIIRS_SOURCES
+        for src in viirs_sources
     ]
     raw_rows: list[dict] = []
     with ThreadPoolExecutor(max_workers=16) as pool:
-        futures = {pool.submit(fetch_source, src, today, bbox): (src, label) for src, bbox, label in tasks}
+        futures = {pool.submit(fetch_source, src, start_date, end_date, bbox): (src, label) for src, bbox, label in tasks}
         for fut in as_completed(futures):
             src, label = futures[fut]
             try:

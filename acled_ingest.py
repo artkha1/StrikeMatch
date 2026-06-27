@@ -5,11 +5,15 @@ RU/UA + Middle East, strike sub_event_types only, 14-day rolling window.
 
 filter -> parse -> dedup -> insert -> verify  (mirrors gdelt_ingest.py structure)
 
+Usage:
+    python acled_ingest.py                              # rolling 14-day window
+    python acled_ingest.py --start 2025-01-14 --end 2025-01-15  # archive range
+
 Requires ACLED_USERNAME / ACLED_PASSWORD in .env (Research-tier OAuth credentials).
 """
+import argparse
 import os
 import pathlib
-import sys
 from datetime import date, datetime, timedelta, timezone
 
 import psycopg2
@@ -153,14 +157,33 @@ def _parse_row(r: dict) -> tuple | None:
 
 # -- Main ----------------------------------------------------------------------
 
+def _parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Ingest ACLED strike events into Postgres.")
+    p.add_argument("--start", type=date.fromisoformat, metavar="YYYY-MM-DD",
+                   help="Archive start date (inclusive). Requires --end.")
+    p.add_argument("--end",   type=date.fromisoformat, metavar="YYYY-MM-DD",
+                   help="Archive end date (inclusive). Requires --start.")
+    args = p.parse_args()
+    if bool(args.start) != bool(args.end):
+        p.error("--start and --end must be used together")
+    return args
+
+
 def main() -> None:
-    effective_today = date.today() - timedelta(days=DATA_LAG_DAYS)
-    since = (effective_today - timedelta(days=LOOKBACK_DAYS)).strftime("%Y-%m-%d")
-    until = effective_today.strftime("%Y-%m-%d")
-    print(
-        f"ACLED ingest: {LOOKBACK_DAYS}-day window {since} to {until}"
-        + (f"  (lag={DATA_LAG_DAYS}d, real date {date.today()})" if DATA_LAG_DAYS else "")
-    )
+    args = _parse_args()
+
+    if args.start and args.end:
+        since = args.start.strftime("%Y-%m-%d")
+        until = args.end.strftime("%Y-%m-%d")
+        print(f"ACLED ingest: [archive] {since} to {until}")
+    else:
+        effective_today = date.today() - timedelta(days=DATA_LAG_DAYS)
+        since = (effective_today - timedelta(days=LOOKBACK_DAYS)).strftime("%Y-%m-%d")
+        until = effective_today.strftime("%Y-%m-%d")
+        print(
+            f"ACLED ingest: {LOOKBACK_DAYS}-day window {since} to {until}"
+            + (f"  (lag={DATA_LAG_DAYS}d, real date {date.today()})" if DATA_LAG_DAYS else "")
+        )
 
     token = _get_token()
     print("OAuth token acquired. Fetching events by country...")

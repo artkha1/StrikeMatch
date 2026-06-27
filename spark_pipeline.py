@@ -5,7 +5,7 @@ Phase 4: PySpark bronze->silver transform + FIRMS<->ACLED candidate join.
 Reads firms_detections and acled_events from Postgres, applies:
   1. Confidence filter  — drop 'l'/'low' rows (mirrors firms_ingest.py)
   2. Satellite-pass dedup — 1 km / ±6 h window via grid-bin equi-join
-  3. FIRMS × GDELT join  — 25 km / -72 h to +12 h, score computation
+  3. FIRMS × ACLED join  — 25 km / event_midnight to +48 h, score computation
 
 Writes:
   firms_silver              <- 7-day deduplicated FIRMS snapshot (overwritten each run)
@@ -64,7 +64,7 @@ DB_DSN: str = os.environ.get(
     "DATABASE_URL",
     "postgresql://postgres:postgres@localhost:5432/satellite_tracking",
 )
-LOOKBACK_DAYS = 14
+LOOKBACK_DAYS = int(os.environ.get("LOOKBACK_DAYS", "14"))
 DATA_LAG_DAYS = int(os.environ.get("DATA_LAG_DAYS", "0"))
 SCHEMA_SQL = (pathlib.Path(__file__).parent / "schema.sql").read_text()
 
@@ -77,10 +77,10 @@ _6H_S  = 21_600   # 6 hours in seconds
 _1KM_M = 1_006.0  # 1 km + 0.6% for Haversine/WGS-84 meridional-radius divergence
 
 # Join constants
-_25KM_M   = 25_000.0
-_72H_S    = 72 * 3600
-_12H_S    = 12 * 3600
-_SCORE_H  = 84.0     # 72 + 12, denominator for temporal decay
+_25KM_M    = 25_000.0
+_48H_S     = 48 * 3600   # fire must be observed within 48 h of event midnight (same/next day)
+_6H_BUFFER = 6 * 3600    # small timezone buffer (ACLED event_date is local; FIRMS is UTC)
+_SCORE_H   = 54.0        # temporal-decay denominator = 48 + 6
 
 
 # ── Spark session ──────────────────────────────────────────────────────────────
@@ -256,11 +256,11 @@ def satellite_pass_dedup(df: DataFrame) -> DataFrame:
             F.abs(F.col("a.acq_datetime").cast("long") - F.col("b.acq_datetime").cast("long")),
         )
         .filter((F.col("dist_m") <= _1KM_M) & (F.col("time_diff_s") <= _6H_S))
-        .select(F.col("b.id").alias("id"))
+        .select(F.col("a.id").alias("id"))   # drop the older (lower-id) row, keep latest
         .distinct()
     )
 
-    # Anti-join: drop every row whose id is dominated by a lower-id neighbour.
+    # Anti-join: drop every row whose id has a higher-id (newer) neighbour — keeps latest.
     return df.join(dominated_ids, on="id", how="left_anti")
 
 
@@ -308,12 +308,15 @@ def compute_candidates(firms_silver: DataFrame, acled: DataFrame) -> DataFrame:
         F.lit(5.0),  # cap at 5° for polar/high-latitude cases
     )
 
+    # Event midnight must be ≤ fire_time + 6h (timezone buffer) and ≥ fire_time - 48h.
+    # Positive time_delta_h (event after fire) is excluded beyond the 6h buffer —
+    # ACLED records actual event date, not publication time, so future events are spurious.
     bbox_joined = f.join(
         F.broadcast(g),
         (F.abs(F.col("f_lat") - F.col("g_lat")) <= lat_margin) &
         (F.abs(F.col("f_lon") - F.col("g_lon")) <= lon_margin) &
-        (F.col("g_dt").cast("long") >= F.col("f_dt").cast("long") - _72H_S) &
-        (F.col("g_dt").cast("long") <= F.col("f_dt").cast("long") + _12H_S),
+        (F.col("g_dt").cast("long") >= F.col("f_dt").cast("long") - _48H_S) &
+        (F.col("g_dt").cast("long") <= F.col("f_dt").cast("long") + _6H_BUFFER),
     )
 
     # Exact Haversine — filter to ≤ 25 km
@@ -536,7 +539,7 @@ def main() -> None:
     print(f"  {written_silver:,} rows written")
 
     # 3. FIRMS × ACLED candidate join + write
-    print("\nComputing FIRMS x ACLED candidates (25 km / -72 h to +12 h)...")
+    print("\nComputing FIRMS x ACLED candidates (25 km / event_midnight ±48 h / +6 h buffer)...")
     candidates = compute_candidates(firms_silver, acled_raw)
     n_candidates = candidates.count()
     print(f"  {n_candidates:,} candidate pairs")

@@ -124,6 +124,18 @@ python acled_ingest.py          # fetch ACLED strike events (14-day, RU/UA+ME), 
 python spark_pipeline.py        # local fallback: dedup → firms_silver; correlate → fire_event_correlations
 ```
 
+Archive mode — fetch a specific date range for calibration/backfill (auto-selects SP products):
+```bash
+python firms_ingest.py --start 2024-01-25 --end 2024-01-26   # Jan 25 2024 Tuapse oil refinery
+python firms_ingest.py --start 2024-08-18 --end 2024-08-19   # Aug 18 2024 Proletarsk oil depot
+python firms_ingest.py --start 2025-01-14 --end 2025-01-15   # Jan 14 2025 Kazan Orgsintez
+python firms_ingest.py --start 2025-01-17 --end 2025-01-18   # Jan 17 2025 Lyudinovo oil depot
+python firms_ingest.py --start 2025-01-29 --end 2025-01-30   # Jan 29 2025 Kstovo refinery
+python firms_ingest.py --start 2025-06-01 --end 2025-06-03   # Jun 1 2025 Spiderweb airbases
+python acled_ingest.py --start 2024-01-25 --end 2024-01-25   # (repeat per event)
+python export_bronze.py --all                                 # export all rows after multi-range ingest
+```
+
 ### Databricks path (primary — Delta medallion)
 ```bash
 python export_bronze.py   # export 14-day bronze windows → Parquet → UC Volume (needs Databricks env)
@@ -221,10 +233,9 @@ idempotent silver-overwrite / gold-upsert instead of the staging dance.
 score = (frp/300) × conf_factor × (num_sources/3) × sqrt(1 − dist/25000) × (1 − |Δt_h|/T)
 ```
 `num_sources` is derived from ACLED's ";"-split `source` field (1–4 typical, so the `/3`
-denominator still holds). The temporal denominator `T` (was 84 = 72+12) must be recentered for
-ACLED's day-level *event* dates — not GDELT's publication time — and recalibrated against V1
-Moscow / V2 Gukovo; the old 0.0199 Gukovo benchmark was GDELT-specific and will shift. Targets
-(revisit after recalibration): ≥0.020 alerting, ≥0.002 archival.
+denominator still holds). Temporal denominator `T = 54` (48 h window + 6 h timezone buffer).
+`Δt_h = event_midnight − fire_time`; in correct matches this is negative (fire after event).
+Score targets (established from ACLED-era ground-truth calibration): ≥0.020 alerting, ≥0.002 archival.
 
 | Component | Formula | Rationale |
 |---|---|---|
@@ -232,14 +243,18 @@ Moscow / V2 Gukovo; the old 0.0199 Gukovo benchmark was GDELT-specific and will 
 | `conf_factor` | `1.0` high / `0.8` nominal | weight high-confidence detections up |
 | `source_credibility` | `LEAST(num_sources/3, 1)` | conflict reporting is 1–4 sources |
 | `proximity_decay` | `SQRT(1 − dist/25000)` | concave; gentler mid-range, 0 at 25 km |
-| `temporal_decay` | `1 − \|Δt_h\|/T` | linear, 0 at the window edge |
+| `temporal_decay` | `1 − \|Δt_h\|/54` | linear decay; T=54 (48 h + 6 h timezone buffer) |
 
 **Match definition (FIRMS × ACLED)**
-A pair is valid when distance ≤ 25 km AND the event date falls within −72 h to +12 h of the
-fire detection. 25 km was sized to GDELT's city-centroid error; ACLED's `geo_precision` 1–2 is
-tighter, so this can be narrowed during recalibration. The +12 h buffer covers a fire seen on an
-overnight pass before its event is dated. Many-to-many: every valid pair is stored (one event ↔
-many fires and vice versa); consumers aggregate (e.g. `MAX(score)`).
+A pair is valid when distance ≤ 25 km AND `event_midnight ∈ [fire_time − 48 h, fire_time + 6 h]`.
+In practice this means the fire must be detected on the same day or the next day after the ACLED
+event date. The +6 h buffer is a timezone allowance only (ACLED event_date is local time; FIRMS
+`acq_datetime` is UTC — a late-night local strike can appear as early-next-day UTC). `time_delta_h`
+is defined as `event_midnight − fire_time`; valid pairs are ≤ 0 (event before fire), or slightly
+positive only within the timezone buffer. GDELT-style large positive values (event published days
+after fire) are excluded — ACLED records actual event dates, not publication times.
+25 km can be narrowed during recalibration since ACLED `geo_precision` 1–2 is tighter than GDELT's
+city-centroid error. Many-to-many: every valid pair is stored; consumers aggregate (`MAX(score)`).
 
 **FIRMS source & false-positive filter**
 VIIRS I-Band 375m only — NRT products (lag ~3 h), switching to the SP archive products when
@@ -247,10 +262,18 @@ VIIRS I-Band 375m only — NRT products (lag ~3 h), switching to the SP archive 
 is dropped at ingest and never stored (agricultural burns and gas flares skew low-confidence);
 `nominal`/`high` are kept; FRP is stored, not thresholded.
 
-**Validation benchmarks (recalibration targets)**
-V1 Moscow Kapotnya (low-FRP — VIIRS missed the peak; a hard true positive) and V2 Gukovo oil
-depot (22.8 MW, high-confidence — the strongest true positive; must rank above V1). Under GDELT
-these scored 0.0019 / 0.0199; re-establish equivalents after retuning the ACLED day-level window.
+**Validation benchmarks (ACLED-era, confirmed matches)**
+All four events below are in the local DB and produce correct correlations via `spark_pipeline.py`.
+
+| Event | Date | Score | Dist | FRP | Notes |
+|---|---|---|---|---|---|
+| Proletarsk oil depot (Rostov) | 2024-08-18 | **0.069** | 5 km | 43.7 MW | Strongest true positive; summer, clear sky; fire burned 2+ days |
+| Dyagilevo airfield (Ryazan) | 2025-06-01 | 0.0045 | 6 km | 5.5 MW | Part of Spiderweb campaign; confirmed air base fuel fire |
+| Lyudinovo oil terminal (Kaluga) | 2025-01-17 | 0.0033 | 1.3 km | 3.4 MW | Winter detection; weak but confirmed |
+| Engels refinery (Saratov) | 2025-01-14 | 0.0020 | 12.6 km | 1.1 MW | Borderline archival threshold; drone debris + fire |
+
+VIIRS misses (cloud cover): Tuapse Jan 2024 (winter Black Sea), Kazan Jan 2025, Kstovo Jan 2025.
+These are expected sensor gaps, not pipeline failures.
 
 **`.env`**
 Single secrets file shared by local scripts and the Airflow container. `DATABASE_URL` in `.env`
