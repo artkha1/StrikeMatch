@@ -158,7 +158,6 @@ def _parse_row(r: dict) -> tuple | None:
         lat,                                                                # [12] latitude
         lon,                                                                # [13] longitude
         sources_raw or None,                                                # [14] source
-        geo_prec,                                                           # [15] geo_precision
     )
 
 
@@ -169,7 +168,7 @@ _ACLED_COLS = [
     "event_type", "sub_event_type", "description", "num_sources",
     "actor1_name", "actor2_name",
     "action_geo_fullname", "action_geo_country",
-    "fatalities", "latitude", "longitude", "source", "geo_precision",
+    "fatalities", "latitude", "longitude", "source",
 ]
 
 _DELTA_COL_ORDER = [
@@ -177,7 +176,7 @@ _DELTA_COL_ORDER = [
     "event_type", "sub_event_type", "description", "num_sources",
     "actor1_name", "actor2_name",
     "action_geo_fullname", "action_geo_country",
-    "fatalities", "latitude", "longitude", "source", "geo_precision", "ingested_at",
+    "fatalities", "latitude", "longitude", "source", "ingested_at",
 ]
 
 

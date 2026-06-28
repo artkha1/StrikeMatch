@@ -65,8 +65,7 @@ _6H_S = 21_600     # 6 hours in seconds
 _1KM_M = 1_006.0   # 1 km + 0.6% for Haversine/WGS-84 meridional-radius divergence
 
 # Join constants (identical to spark_pipeline.py)
-_10KM_M    = 10_000.0    # proximity gate for geo_precision=1 (exact coordinates)
-_15KM_M    = 15_000.0    # proximity gate for geo_precision=2 (nearest admin center, ≤25 km error)
+_10KM_M    = 10_000.0    # proximity gate AND scoring denominator (replaces _25KM_M)
 _MIN_FRP_MW = 1.0        # minimum FRP (MW) for correlation — filters sub-thermal noise at join time
 _48H_S     = 48 * 3600   # fire must be observed within 48 h of event midnight (same/next day)
 _6H_BUFFER = 6 * 3600    # small timezone buffer (ACLED event_date is local; FIRMS is UTC)
@@ -192,12 +191,9 @@ def compute_candidates(firms_silver: DataFrame, acled: DataFrame) -> DataFrame:
         F.col("description").alias("event_description"),
         F.col("action_geo_fullname").alias("event_location_full_name"),
         F.col("source").alias("event_source"),
-        # NULL → 2: existing rows pre-dating this column are all precision 1 or 2;
-        # treating unknown as 2 gives the wider (safer) radius.
-        F.coalesce(F.col("geo_precision"), F.lit(2)).alias("geo_precision"),
     )
 
-    lat_margin = 0.135  # 15 km in degrees latitude (wider gate; Haversine tightens per precision)
+    lat_margin = 0.090  # 10 km in degrees latitude
     lon_margin = F.least(
         F.lit(lat_margin) / F.cos(F.radians(F.col("f_lat"))),
         F.lit(5.0),  # cap at 5° for polar/high-latitude cases
@@ -223,11 +219,7 @@ def compute_candidates(firms_silver: DataFrame, acled: DataFrame) -> DataFrame:
                 F.col("g_lat"), F.col("g_lon"),
             ).cast(FloatType()),
         )
-        .withColumn(
-            "max_dist_m",
-            F.when(F.col("geo_precision") == 1, F.lit(_10KM_M)).otherwise(F.lit(_15KM_M)),
-        )
-        .filter(F.col("distance_m") <= F.col("max_dist_m"))
+        .filter(F.col("distance_m") <= _10KM_M)
     )
 
     with_time = with_dist.withColumn(
@@ -241,7 +233,7 @@ def compute_candidates(firms_silver: DataFrame, acled: DataFrame) -> DataFrame:
             F.least(F.coalesce(F.col("frp").cast("double"), F.lit(0.0)) / 300.0, F.lit(1.0))
             * F.when(F.col("confidence") == "h", F.lit(1.0)).otherwise(F.lit(0.8))
             * F.least(F.coalesce(F.col("num_sources"), F.lit(1)).cast("double") / 3.0, F.lit(1.0))
-            * F.sqrt(F.lit(1.0) - F.col("distance_m").cast("double") / F.col("max_dist_m").cast("double"))
+            * F.sqrt(F.lit(1.0) - F.col("distance_m").cast("double") / _10KM_M)
             * (F.lit(1.0) - F.abs(F.col("time_delta_h").cast("double")) / _SCORE_H)
         ).cast(FloatType()),
     )
@@ -296,14 +288,9 @@ def ensure_namespace() -> None:
             actor1_name STRING, actor2_name STRING,
             action_geo_fullname STRING, action_geo_country STRING,
             fatalities INT,
-            latitude DOUBLE, longitude DOUBLE, source STRING,
-            geo_precision INT, ingested_at TIMESTAMP
+            latitude DOUBLE, longitude DOUBLE, source STRING, ingested_at TIMESTAMP
         ) USING DELTA
     """)
-    try:
-        spark.sql(f"ALTER TABLE {T_ACLED_BRONZE} ADD COLUMN geo_precision INT")
-    except Exception:
-        pass  # column already exists
     spark.sql(f"""
         CREATE TABLE IF NOT EXISTS {T_FIRMS_SILVER} (
             id BIGINT, acq_datetime TIMESTAMP,
@@ -525,7 +512,7 @@ def main() -> None:
     # materialization point — the analogue of spark_pipeline.py's firms_silver.cache().
     firms_silver = spark.table(T_FIRMS_SILVER)
 
-    print("\nComputing FIRMS x ACLED candidates (10/15 km geo_precision-tiered / event_midnight ±48 h / +6 h buffer)...")
+    print("\nComputing FIRMS x ACLED candidates (10 km / event_midnight ±48 h / +6 h buffer)...")
     candidates = compute_candidates(firms_silver, acled_raw)
     n_candidates = candidates.count()
     print(f"  {n_candidates:,} candidate pairs")
