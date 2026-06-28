@@ -1,40 +1,36 @@
 #!/usr/bin/env python3
 """
-ACLED conflict-event ingestion -> acled_events.
+ACLED conflict-event ingestion -> Parquet -> Databricks UC Volume.
 RU/UA + Middle East, strike sub_event_types only, 14-day rolling window.
-
-filter -> parse -> dedup -> insert -> verify  (mirrors gdelt_ingest.py structure)
 
 Usage:
     python acled_ingest.py                              # rolling 14-day window
     python acled_ingest.py --start 2025-01-14 --end 2025-01-15  # archive range
 
 Requires ACLED_USERNAME / ACLED_PASSWORD in .env (Research-tier OAuth credentials).
+Requires DATABRICKS_HOST, DATABRICKS_TOKEN, DATABRICKS_VOLUME_PATH in .env.
 """
 import argparse
 import os
-import pathlib
+import tempfile
 from datetime import date, datetime, timedelta, timezone
 
-import psycopg2
-import psycopg2.extras
+import pandas as pd
 import requests
+from databricks.sdk import WorkspaceClient
 from dotenv import load_dotenv
 
 load_dotenv()
 
-DB_DSN: str = os.environ.get(
-    "DATABASE_URL",
-    "postgresql://postgres:postgres@localhost:5432/satellite_tracking",
-)
-SCHEMA_SQL = (pathlib.Path(__file__).parent / "schema.sql").read_text()
+VOLUME_PATH = os.environ.get(
+    "DATABRICKS_VOLUME_PATH", "/Volumes/workspace/fire_pipeline/bronze_inbound"
+).rstrip("/")
 
 LOOKBACK_DAYS = 14
 PAGE_SIZE = 5000
 
 # Free Research-tier accounts trail real-time by ~52 weeks.
 # Set DATA_LAG_DAYS in .env to shift the rolling window back accordingly.
-# Paid / real-time access: leave at 0.
 DATA_LAG_DAYS = int(os.environ.get("DATA_LAG_DAYS", "0"))
 
 ACLED_TOKEN_URL = "https://acleddata.com/oauth/token"
@@ -137,7 +133,7 @@ def _parse_row(r: dict) -> tuple | None:
     num_sources = max(len(source_parts), 1)
 
     return (
-        str(r["event_id_cnty"]),                                           # [0]  global_event_id TEXT
+        str(r["event_id_cnty"]),                                           # [0]  global_event_id
         ev_date,                                                            # [1]  event_date
         ev_dt,                                                              # [2]  event_datetime
         (r.get("event_type") or "").strip() or None,                       # [3]  event_type
@@ -155,10 +151,54 @@ def _parse_row(r: dict) -> tuple | None:
     )
 
 
+# -- DataFrame + upload -------------------------------------------------------
+
+_ACLED_COLS = [
+    "global_event_id", "event_date", "event_datetime",
+    "event_type", "sub_event_type", "description", "num_sources",
+    "actor1_name", "actor2_name",
+    "action_geo_fullname", "action_geo_country",
+    "fatalities", "latitude", "longitude", "source_url",
+]
+
+_DELTA_COL_ORDER = [
+    "id", "global_event_id", "event_date", "event_datetime",
+    "event_type", "sub_event_type", "description", "num_sources",
+    "actor1_name", "actor2_name",
+    "action_geo_fullname", "action_geo_country",
+    "fatalities", "latitude", "longitude", "source_url", "ingested_at",
+]
+
+
+def _build_dataframe(rows: list[tuple]) -> pd.DataFrame:
+    df = pd.DataFrame(rows, columns=_ACLED_COLS)
+    # Stable hash ID from global_event_id — keeps correlations table references
+    # consistent on re-runs (FIRMS also uses hash-based IDs for the same reason).
+    df["id"] = pd.util.hash_pandas_object(
+        df[["global_event_id"]], index=False
+    ).astype("int64")
+    df["ingested_at"] = pd.Timestamp.now(tz="UTC")
+    return df[_DELTA_COL_ORDER]
+
+
+def _upload(df: pd.DataFrame, subdir: str) -> None:
+    target = f"{VOLUME_PATH}/{subdir}/{subdir}.parquet"
+    with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
+        tmp_path = tmp.name
+    try:
+        df.to_parquet(tmp_path, index=False, coerce_timestamps="us")
+        w = WorkspaceClient()
+        with open(tmp_path, "rb") as fh:
+            w.files.upload(target, fh, overwrite=True)
+    finally:
+        os.unlink(tmp_path)
+    print(f"  Uploaded → {target}  ({len(df):,} rows)")
+
+
 # -- Main ----------------------------------------------------------------------
 
 def _parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Ingest ACLED strike events into Postgres.")
+    p = argparse.ArgumentParser(description="Ingest ACLED strike events into Databricks UC Volume.")
     p.add_argument("--start", type=date.fromisoformat, metavar="YYYY-MM-DD",
                    help="Archive start date (inclusive). Requires --end.")
     p.add_argument("--end",   type=date.fromisoformat, metavar="YYYY-MM-DD",
@@ -205,7 +245,7 @@ def main() -> None:
         f"({skipped:,} skipped — bad coords, geo_precision=3, or non-strike sub_event_type)"
     )
 
-    # Dedup within batch by event_id_cnty (ACLED can return the same event_id_cnty for
+    # Dedup within batch by global_event_id (ACLED can return the same event_id_cnty for
     # events appearing in multiple country queries if geo overlaps)
     seen: set[str] = set()
     deduped: list[tuple] = []
@@ -215,72 +255,14 @@ def main() -> None:
             deduped.append(r)
     print(f"After dedup: {len(deduped):,}  ({len(parsed) - len(deduped):,} removed)")
 
-    conn = psycopg2.connect(DB_DSN)
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(SCHEMA_SQL)
+    if not deduped:
+        print("Nothing to upload.")
+        return
 
-        if not deduped:
-            print("Nothing to insert.")
-        else:
-            # Append (lon, lat) for ST_MakePoint(longitude, latitude) — index [15], [16]
-            extended = [(*r, r[13], r[12]) for r in deduped]
-            with conn:
-                with conn.cursor() as cur:
-                    psycopg2.extras.execute_values(
-                        cur,
-                        """
-                        INSERT INTO acled_events
-                            (global_event_id, event_date, event_datetime,
-                             event_type, sub_event_type, description, num_sources,
-                             actor1_name, actor2_name,
-                             action_geo_fullname, action_geo_country,
-                             fatalities, latitude, longitude, source_url, geom)
-                        VALUES %s
-                        ON CONFLICT (global_event_id) DO NOTHING
-                        """,
-                        extended,
-                        template=(
-                            "(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
-                            "ST_SetSRID(ST_MakePoint(%s,%s),4326)::geography)"
-                        ),
-                        page_size=500,
-                    )
-                    inserted = cur.rowcount
-            print(f"Inserted: {inserted:,}  (ON CONFLICT skipped {len(deduped) - inserted:,})")
-
-        # Verification
-        print("\n-- Verification -------------------------------------------------------")
-        with conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM acled_events")
-            total: int = cur.fetchone()[0]
-
-            cur.execute("""
-                SELECT sub_event_type, COUNT(*) AS n
-                FROM acled_events
-                GROUP BY sub_event_type ORDER BY sub_event_type
-            """)
-            subtype_dist = cur.fetchall()
-
-            cur.execute("""
-                SELECT global_event_id, event_datetime, actor1_name, actor2_name,
-                       action_geo_fullname, sub_event_type, fatalities
-                FROM acled_events ORDER BY ingested_at DESC, id DESC LIMIT 3
-            """)
-            samples = cur.fetchall()
-
-        print(f"1. acled_events total: {total:,}")
-        print(f"2. sub_event_type distribution: {subtype_dist}")
-        print("3. Sample rows (3 most recently ingested):")
-        for r in samples:
-            print(
-                f"   {r[0]}  {r[1]}  [{r[2] or '?'} -> {r[3] or '?'}]"
-                f"  {r[4]}  {r[5]}  fatalities={r[6]}"
-            )
-
-    finally:
-        conn.close()
+    df = _build_dataframe(deduped)
+    print(f"\nUploading Parquet to UC Volume...")
+    _upload(df, "acled_events")
+    print("Done.")
 
 
 if __name__ == "__main__":

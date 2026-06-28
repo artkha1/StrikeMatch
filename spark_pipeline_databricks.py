@@ -601,7 +601,7 @@ def main() -> None:
     # materialization point — the analogue of spark_pipeline.py's firms_silver.cache().
     firms_silver = spark.table(T_FIRMS_SILVER)
 
-    print("\nComputing FIRMS x ACLED candidates (25 km / event_midnight ±48 h / +6 h buffer)...")
+    print("\nComputing FIRMS x ACLED candidates (10 km / event_midnight ±48 h / +6 h buffer)...")
     candidates = compute_candidates(firms_silver, acled_raw)
     n_candidates = candidates.count()
     print(f"  {n_candidates:,} candidate pairs")

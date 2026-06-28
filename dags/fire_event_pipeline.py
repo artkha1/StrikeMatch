@@ -73,22 +73,21 @@ with DAG(
     doc_md="""
 ## Fire-Event Correlation Pipeline (Databricks)
 
-Ingests NASA FIRMS detections and ACLED strike events into local Postgres (bronze
-source), exports the 14-day windows to Parquet and uploads them to a Databricks Unity
-Catalog Volume, then triggers the Databricks Spark job that builds the Delta
-bronze→silver→gold medallion. Gold is served to Power BI from a serverless SQL
-warehouse; validation queries that warehouse.
+Ingests NASA FIRMS detections and ACLED strike events directly to Parquet on a
+Databricks Unity Catalog Volume, then triggers the Databricks Spark job that builds
+the Delta bronze→silver→gold medallion. Gold is served to Power BI from a serverless
+SQL warehouse; validation queries that warehouse.
 
 Scope: Russia/Ukraine + Middle East theaters only.
 
 **Task graph**
 ```
 ingest_firms ─┐
-               ├──► export_bronze ──► run_databricks_job ──► validate_pipeline
+               ├──► run_databricks_job ──► validate_pipeline
 ingest_acled ─┘
 ```
 
-All tasks are **idempotent** — ingest dedups, export overwrites the Volume Parquet,
+All tasks are **idempotent** — ingest scripts overwrite the Volume Parquet,
 the Databricks job MERGEs bronze/gold. Schedule: daily at 06:00 UTC.
     """,
 ) as dag:
@@ -103,12 +102,6 @@ the Databricks job MERGEs bronze/gold. Schedule: daily at 06:00 UTC.
         bash_command=f"cd {PIPELINE_DIR} && python acled_ingest.py",
     )
 
-    # Export the 14-day bronze windows to Parquet and push to the UC Volume.
-    export_bronze = BashOperator(
-        task_id="export_bronze",
-        bash_command=f"cd {PIPELINE_DIR} && python export_bronze.py",
-    )
-
     # Trigger the deployed Databricks job (bronze→silver→gold Delta) over HTTPS.
     run_databricks_job = DatabricksRunNowOperator(
         task_id="run_databricks_job",
@@ -121,4 +114,4 @@ the Databricks job MERGEs bronze/gold. Schedule: daily at 06:00 UTC.
         python_callable=_validate_pipeline,
     )
 
-    [ingest_firms, ingest_acled] >> export_bronze >> run_databricks_job >> validate_pipeline
+    [ingest_firms, ingest_acled] >> run_databricks_job >> validate_pipeline

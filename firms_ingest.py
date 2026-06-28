@@ -1,37 +1,33 @@
 #!/usr/bin/env python3
 """
-FIRMS VIIRS I-Band 375m NRT -> PostGIS ingestion.
-Fetch the rolling window (RU/UA + Middle East), filter low-confidence, dedup, insert.
-Design notes (source, filter, dedup) in CLAUDE.md.
+FIRMS VIIRS I-Band 375m NRT/SP -> Parquet -> Databricks UC Volume.
+Fetch CSVs, filter low-confidence + conflict-zone, write Parquet, upload.
 
 Usage:
     python firms_ingest.py                              # rolling 14-day window
     python firms_ingest.py --start 2025-01-14 --end 2025-01-15  # archive range
-Requires FIRMS_MAP_KEY in .env (get one free at https://firms.modaps.eosdis.nasa.gov/api/)
+Requires FIRMS_MAP_KEY, DATABRICKS_HOST, DATABRICKS_TOKEN, DATABRICKS_VOLUME_PATH in .env
 """
 import argparse
 import csv
 import os
-import pathlib
+import tempfile
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 
-import psycopg2
-import psycopg2.extras
+import pandas as pd
 import requests
+from databricks.sdk import WorkspaceClient
 from dotenv import load_dotenv
 
 load_dotenv()
 
 FIRMS_MAP_KEY: str = os.environ["FIRMS_MAP_KEY"]
-DB_DSN: str = os.environ.get(
-    "DATABASE_URL",
-    "postgresql://postgres:postgres@localhost:5432/satellite_tracking",
-)
+VOLUME_PATH = os.environ.get(
+    "DATABRICKS_VOLUME_PATH", "/Volumes/workspace/fire_pipeline/bronze_inbound"
+).rstrip("/")
 FIRMS_BASE = "https://firms.modaps.eosdis.nasa.gov/api/area/csv"
-# Shift the rolling window back to stay in sync with ACLED's data lag.
-# Set DATA_LAG_DAYS in .env. 0 for paid/real-time access (default).
 DATA_LAG_DAYS = int(os.environ.get("DATA_LAG_DAYS", "0"))
 LOOKBACK_DAYS = 14
 
@@ -88,63 +84,6 @@ REGION_BBOXES: list[tuple[str, str]] = [
     ("Middle East",              "25,12,64,43"),    # Israel/Gaza/WB, Lebanon, Syria, Iraq,
                                                     # Yemen, Iran, Turkey, Gulf states, Jordan
 ]
-
-SCHEMA_SQL = (pathlib.Path(__file__).parent / "schema.sql").read_text()
-
-CREATE_STAGE_SQL = """
-CREATE TEMP TABLE _stage (
-    acq_datetime TIMESTAMPTZ      NOT NULL,
-    latitude     DOUBLE PRECISION NOT NULL,
-    longitude    DOUBLE PRECISION NOT NULL,
-    bright_ti4   REAL,
-    bright_ti5   REAL,
-    frp          REAL,
-    scan         REAL,
-    track        REAL,
-    satellite    VARCHAR(10),
-    confidence   VARCHAR(10),
-    daynight     CHAR(1),
-    type         SMALLINT,
-    version      VARCHAR(10)
-) ON COMMIT DROP;
-"""
-
-# Eliminate within-batch near-duplicates before inserting into firms_detections.
-# The NOT EXISTS check in INSERT_FROM_STAGE_SQL only compares against already-committed
-# rows, so it can't dedup within the batch itself (critical on a fresh/truncated table).
-# Keep the row with the largest _rid (latest detection) in each 1km/6h cluster so the
-# most temporally recent satellite pass survives — aligns with the silver dedup policy.
-_STAGE_SELF_DEDUP_SQL = """
-DELETE FROM _stage s1
-USING _stage s2
-WHERE s1._rid < s2._rid
-  AND ST_DWithin(s1.geom, s2.geom, 1000)
-  AND ABS(EXTRACT(EPOCH FROM (s1.acq_datetime - s2.acq_datetime))) <= 21600
-"""
-
-INSERT_FROM_STAGE_SQL = """
-INSERT INTO firms_detections
-    (acq_datetime, geom, latitude, longitude,
-     bright_ti4, bright_ti5, frp, scan, track,
-     satellite, confidence, daynight, type, version)
-SELECT
-    s.acq_datetime,
-    s.geom,
-    s.latitude, s.longitude,
-    s.bright_ti4, s.bright_ti5, s.frp, s.scan, s.track,
-    s.satellite, s.confidence, s.daynight, s.type, s.version
-FROM _stage s
-WHERE NOT EXISTS (
-    SELECT 1
-    FROM firms_detections d
-    WHERE ST_DWithin(
-              d.geom,
-              s.geom,
-              1000
-          )
-      AND ABS(EXTRACT(EPOCH FROM (d.acq_datetime - s.acq_datetime))) <= 21600
-)
-"""
 
 
 # -- Fetch ---------------------------------------------------------------------
@@ -215,53 +154,50 @@ def parse_row(raw: dict) -> tuple | None:
     )
 
 
-# -- Verification --------------------------------------------------------------
+# -- DataFrame + upload -------------------------------------------------------
 
-def verify(conn: "psycopg2.connection") -> None:
-    print("\n-- Verification -------------------------------------------------------")
-    with conn.cursor() as cur:
-        cur.execute("SELECT COUNT(*) FROM firms_detections")
-        total: int = cur.fetchone()[0]
+_FIRMS_COLS = [
+    "acq_datetime", "latitude", "longitude",
+    "bright_ti4", "bright_ti5", "frp", "scan", "track",
+    "satellite", "confidence", "daynight", "type", "version",
+]
 
-        cur.execute("SELECT ST_Extent(geom::geometry) FROM firms_detections")
-        bbox = cur.fetchone()[0]
+_DELTA_COL_ORDER = [
+    "id", "acq_datetime", "latitude", "longitude",
+    "bright_ti4", "bright_ti5", "frp", "scan", "track",
+    "satellite", "confidence", "daynight", "type", "version", "ingested_at",
+]
 
-        cur.execute("""
-            SELECT COUNT(*)
-            FROM firms_detections a
-            JOIN firms_detections b ON a.id < b.id
-            WHERE a.satellite = b.satellite
-              AND ST_DWithin(a.geom, b.geom, 1000)
-              AND ABS(EXTRACT(EPOCH FROM (a.acq_datetime - b.acq_datetime))) <= 21600
-        """)
-        dup_pairs: int = cur.fetchone()[0]
 
-        cur.execute("""
-            SELECT id, acq_datetime, latitude, longitude, satellite, confidence, frp
-            FROM firms_detections
-            ORDER BY ingested_at DESC, id DESC
-            LIMIT 3
-        """)
-        samples = cur.fetchall()
+def _build_dataframe(rows: list[tuple]) -> pd.DataFrame:
+    df = pd.DataFrame(rows, columns=_FIRMS_COLS)
+    # Stable hash ID from natural key — keeps the Delta MERGE idempotent on re-runs.
+    # pd.util.hash_pandas_object is deterministic within a pandas version.
+    df["id"] = pd.util.hash_pandas_object(
+        df[["acq_datetime", "latitude", "longitude", "satellite"]], index=False
+    ).astype("int64")
+    df["ingested_at"] = pd.Timestamp.now(tz="UTC")
+    return df[_DELTA_COL_ORDER]
 
-    print(f"1. Row count:    {total:,}")
-    print(f"2. Bounding box: {bbox}")
-    dup_flag = "  <-- WARNING: dedup bug?" if dup_pairs > 0 else ""
-    print(f"3. Dup pairs (same sat, <=1km, <=6h): {dup_pairs}{dup_flag}")
-    print()
-    print("Sample rows (3 most recently ingested):")
-    print(f"  {'id':>8}  {'acq_datetime':<28}  {'lat':>9}  {'lon':>10}  {'sat':<3}  {'conf':<4}  frp")
-    for row in samples:
-        print(
-            f"  {row[0]:>8}  {str(row[1]):<28}  {row[2]:>9.4f}  {row[3]:>10.4f}"
-            f"  {str(row[4] or ''):<3}  {str(row[5] or ''):<4}  {row[6]}"
-        )
+
+def _upload(df: pd.DataFrame, subdir: str) -> None:
+    target = f"{VOLUME_PATH}/{subdir}/{subdir}.parquet"
+    with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
+        tmp_path = tmp.name
+    try:
+        df.to_parquet(tmp_path, index=False, coerce_timestamps="us")
+        w = WorkspaceClient()
+        with open(tmp_path, "rb") as fh:
+            w.files.upload(target, fh, overwrite=True)
+    finally:
+        os.unlink(tmp_path)
+    print(f"  Uploaded → {target}  ({len(df):,} rows)")
 
 
 # -- Main ----------------------------------------------------------------------
 
 def _parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Ingest FIRMS VIIRS fire detections into Postgres.")
+    p = argparse.ArgumentParser(description="Ingest FIRMS VIIRS fire detections into Databricks UC Volume.")
     p.add_argument("--start", type=date.fromisoformat, metavar="YYYY-MM-DD",
                    help="Archive start date (inclusive). Requires --end.")
     p.add_argument("--end",   type=date.fromisoformat, metavar="YYYY-MM-DD",
@@ -340,58 +276,16 @@ def main() -> None:
             deduped.append(row)
 
     exact_dups = len(parsed) - len(deduped)
-    print(f"After exact dedup:           {len(deduped):,}  ({exact_dups:,} removed)")
+    print(f"After exact dedup: {len(deduped):,}  ({exact_dups:,} removed)")
 
-    conn = psycopg2.connect(DB_DSN)
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(SCHEMA_SQL)
+    if not deduped:
+        print("Nothing to upload.")
+        return
 
-        if not deduped:
-            print("Nothing to insert.")
-            verify(conn)
-            return
-
-        n_candidates = len(deduped)
-        print(f"\nStaging {n_candidates:,} candidates, applying 1km/6h spatial dedup...")
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(CREATE_STAGE_SQL)
-                psycopg2.extras.execute_values(
-                    cur,
-                    """
-                    INSERT INTO _stage
-                        (acq_datetime, latitude, longitude,
-                         bright_ti4, bright_ti5, frp, scan, track,
-                         satellite, confidence, daynight, type, version)
-                    VALUES %s
-                    """,
-                    deduped,
-                    page_size=2000,
-                )
-
-                # Build spatial index on staging table, then self-dedup within batch.
-                cur.execute("ALTER TABLE _stage ADD COLUMN geom geography")
-                cur.execute("UPDATE _stage SET geom = ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)::geography")
-                cur.execute("CREATE INDEX ON _stage USING GIST(geom)")
-                cur.execute("ALTER TABLE _stage ADD COLUMN _rid SERIAL")
-                cur.execute(_STAGE_SELF_DEDUP_SQL)
-                within_batch_dups = cur.rowcount
-
-                cur.execute(INSERT_FROM_STAGE_SQL)
-                inserted = cur.rowcount
-
-        incremental_skipped = n_candidates - within_batch_dups - inserted
-        print(
-            f"Within-batch dedup: {within_batch_dups:,} removed  |  "
-            f"Inserted: {inserted:,}  (incremental spatial dedup skipped {incremental_skipped:,})"
-        )
-
-        verify(conn)
-
-    finally:
-        conn.close()
+    df = _build_dataframe(deduped)
+    print(f"\nUploading Parquet to UC Volume...")
+    _upload(df, "firms_detections")
+    print("Done.")
 
 
 if __name__ == "__main__":

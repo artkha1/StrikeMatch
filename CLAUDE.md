@@ -22,42 +22,15 @@ FIRMS SP archive products cover any date, with no embargo.
 
 # Current Phase — ACTIVE TASKS (next session picks up here)
 
-The ACLED migration is complete and the algorithm has been tuned. Four tasks remain:
+The ACLED migration is complete and the algorithm has been tuned. Three tasks remain
+(Task 1 is complete):
 
-## Task 1 — Remove PostgreSQL entirely
+## ~~Task 1 — Remove PostgreSQL entirely~~ ✓ DONE
 
-**Why:** Postgres/PostGIS is used only as a local staging layer. Its sole PostGIS-specific
-operation (incremental spatial dedup via `ST_DWithin`) is already superseded by the Spark
-`satellite_pass_dedup` that runs every job. Removing Postgres simplifies the stack to:
-ingest scripts → Parquet → UC Volume → Databricks job.
-
-**What changes:**
-- **`firms_ingest.py`** — remove all psycopg2/PostGIS logic. Keep CSV fetch, parse, filter
-  (confidence, bbox). Write output directly as Parquet, upload to
-  `/Volumes/workspace/fire_pipeline/bronze_inbound/firms_detections/`. The 1 km / 6 h
-  incremental dedup (currently a PostGIS NOT EXISTS) is dropped — `satellite_pass_dedup`
-  in the Spark job handles dedup more aggressively and correctly.
-- **`acled_ingest.py`** — remove psycopg2. Keep OAuth fetch + parse + filter. Write Parquet,
-  upload to `/Volumes/workspace/fire_pipeline/bronze_inbound/acled_events/`. ACLED dedup on
-  `global_event_id` is already handled by the Delta MERGE in the Databricks job.
-- **`export_bronze.py`** — delete (superseded; ingest scripts now write directly to Volume).
-- **`schema.sql`** — delete (no Postgres).
-- **`spark_pipeline.py`** — delete or retire to `/archive/`. The local Postgres fallback is
-  no longer meaningful without a DB.
-- **`docker-compose.yml`** — remove the `db` (Postgres) service. Keep Airflow only.
-- **`dags/fire_event_pipeline.py`** — remove `ingest_firms`, `ingest_acled`, `export_bronze`
-  tasks (they now run locally and upload directly). DAG collapses to:
-  `run_databricks_job ──► validate_pipeline`.
-- **`.env`** — remove `DATABASE_URL`. Keep `EARTHDATA_TOKEN`, `ACLED_USERNAME`,
-  `ACLED_PASSWORD`, `DATABRICKS_HOST`, `DATABRICKS_TOKEN`.
-
-**New ingest script pattern** (same for both):
-```python
-# fetch → parse → filter → write Parquet → upload to UC Volume
-df.to_parquet(tmp_path, index=False, coerce_timestamps="us")
-w.files.upload(f"{VOLUME_PATH}/firms_detections/firms_detections.parquet", fh, overwrite=True)
-```
-Reuse the upload helper already in `export_bronze.py` before deleting it.
+Postgres/PostGIS removed. Ingest scripts now write Parquet directly to the UC Volume.
+Deleted: `export_bronze.py`, `schema.sql`, `spark_pipeline.py`.
+IDs are stable hash-based values: FIRMS from `hash(acq_datetime, lat, lon, satellite)`,
+ACLED from `hash(global_event_id)` — both via `pd.util.hash_pandas_object`.
 
 ## Task 2 — Column renames
 
@@ -127,7 +100,7 @@ The pipeline needs to ingest the full war period, not just a rolling 14-day wind
 script already auto-selects SP products when date is > 10 days old, and chunks into 5-day
 API requests internally. Run month-by-month to manage memory and upload size:
 ```bash
-python firms_ingest.py --start 2022-02-01 --end 2022-02-28
+python firms_ingest.py --start 2022-02-23 --end 2022-02-28
 python firms_ingest.py --start 2022-03-01 --end 2022-03-31
 # ... continue month by month ...
 ```
@@ -135,7 +108,7 @@ python firms_ingest.py --start 2022-03-01 --end 2022-03-31
 **ACLED:** Research-tier lag means data is available up to ~today − 1 year. Same
 `--start`/`--end` interface. Batch by month:
 ```bash
-python acled_ingest.py --start 2022-02-01 --end 2022-02-28
+python acled_ingest.py --start 2022-02-24 --end 2022-02-28
 # ...
 ```
 
@@ -161,8 +134,7 @@ the Parquet will be overwritten and the Delta MERGE will skip already-existing r
 - **Read:** `GET https://acleddata.com/api/acled/read?_format=json` with filters
   `country=Ukraine|Russia|Syria|...`, `event_type=Explosions/Remote violence`,
   `event_date={yyyy-mm-dd}&event_date_where=>`; paginate 5000 rows/call.
-- **Strike filter:** `sub_event_type` ∈ {Air/drone strike, Shelling/artillery/missile attack,
-  Remote explosive/landmine/IED}; `geo_precision` 1–2 only.
+- **Strike filter:** `sub_event_type` ∈ {Air/drone strike, Shelling/artillery/missile attack}; `geo_precision` 1–2 only.
 - **Credentials:** `ACLED_USERNAME` / `ACLED_PASSWORD` in `.env` — never hardcode or commit.
 
 ## Column mapping (ACLED API → acled_events Delta table)
@@ -175,15 +147,14 @@ the Parquet will be overwritten and the Delta MERGE will skip already-existing r
 ---
 
 # Stack
-- Python 3.x, requests, pandas, databricks-sdk
+- Python 3.x, requests, pandas, databricks-sdk, pyarrow
 - PySpark — Databricks serverless (`spark_pipeline_databricks.py`, primary)
 - Apache Airflow 2.9.2 via Docker Compose — triggers the Databricks job on schedule
 - Power BI serves the gold layer from a Databricks serverless SQL warehouse
 - ACLED conflict-event source via OAuth API (~1-year research lag)
-- NASA Earthdata token + ACLED OAuth + Databricks PAT read from `.env`
+- NASA FIRMS MAP Key + ACLED OAuth + Databricks PAT read from `.env`
 
-**Postgres/PostGIS removed** — was a local staging layer; eliminated in favour of
-direct Parquet upload from ingest scripts to Databricks UC Volume.
+**Postgres/PostGIS removed** — ingest scripts write Parquet directly to the UC Volume.
 
 ---
 
@@ -206,7 +177,7 @@ Archive / backfill mode:
 ```bash
 python firms_ingest.py --start 2022-02-01 --end 2022-02-28
 python acled_ingest.py --start 2022-02-01 --end 2022-02-28
-# repeat month by month; then trigger Databricks job once
+# repeat month by month; then trigger Databricks job once. Start with February 24, 2022 to match Russian invasion of Ukraine
 ```
 
 Ground-truth calibration dates:
@@ -235,35 +206,6 @@ Trigger job: Databricks Workflows UI → `fire_event_pipeline` → Run now.
 ---
 
 ## Architecture
-
-### Data flow (post-Postgres-removal)
-```
-NASA FIRMS API (VIIRS SNPP + NOAA-20, 375m)
-    │
-    ▼ firms_ingest.py  (parse + filter + Parquet upload)
-    │
-    ├──────────────────────────────────────────────────────────────────┐
-    │                                                                  │
-    ▼                                                                  ▼
-UC Volume Parquet                                            UC Volume Parquet
-(firms_detections/)                                         (acled_events/)
-    │                                                                  │
-    └───────────────── spark_pipeline_databricks.py ───────────────────┘
-                        MERGE → bronze Delta
-                        satellite_pass_dedup → firms_silver (Delta)
-                        compute_candidates → fire_event_correlations (Delta)
-                        build_serving_view → gold_fire_event_map (Delta view)
-                                │
-                                ▼
-                     Databricks SQL warehouse ──► Power BI
-```
-
-### DAG topology (post-Postgres-removal)
-```
-run_databricks_job ──► validate_pipeline
-```
-Ingest scripts run locally (or via cron/CI); they upload directly to the UC Volume.
-The DAG no longer needs to orchestrate ingest — just triggers the job and validates.
 
 ### Tables (all Delta, `workspace.fire_pipeline.*`)
 
@@ -330,12 +272,20 @@ correlation time. MODIS and VIIRS 750m excluded.
 VIIRS cloud-cover misses (expected, not pipeline failures): Tuapse Jan 2024, Kazan Jan 2025,
 Kstovo Jan 2025.
 
-**`.env`**
+**`.env`** (see `.env.example` for full template)
 ```
-EARTHDATA_TOKEN=...
+FIRMS_MAP_KEY=...              # get free key at firms.modaps.eosdis.nasa.gov/api/
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/satellite_tracking
 ACLED_USERNAME=...
 ACLED_PASSWORD=...
-DATABRICKS_HOST=...
+DATA_LAG_DAYS=364              # ACLED research-tier lag in days; 0 for real-time
+DATABRICKS_HOST=https://...
 DATABRICKS_TOKEN=...
+DATABRICKS_VOLUME_PATH=/Volumes/workspace/fire_pipeline/bronze_inbound
+DATABRICKS_JOB_ID=...
+DATABRICKS_SQL_HTTP_PATH=/sql/1.0/warehouses/...
+FP_CATALOG=workspace           # optional; defaults to "workspace"
+FP_SCHEMA=fire_pipeline        # optional; defaults to "fire_pipeline"
+AIRFLOW_CONN_DATABRICKS_DEFAULT={"conn_type":"databricks","host":"...","password":"..."}
 ```
-`DATABASE_URL` removed (no Postgres). Never hardcode or commit secrets.
+After Task 1 (Postgres removal): `DATABASE_URL` is dropped. Never hardcode or commit secrets.
