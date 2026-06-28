@@ -300,7 +300,10 @@ def ensure_namespace() -> None:
             geo_precision INT, ingested_at TIMESTAMP
         ) USING DELTA
     """)
-    spark.sql(f"ALTER TABLE {T_ACLED_BRONZE} ADD COLUMNS IF NOT EXISTS (geo_precision INT)")
+    try:
+        spark.sql(f"ALTER TABLE {T_ACLED_BRONZE} ADD COLUMN geo_precision INT")
+    except Exception:
+        pass  # column already exists
     spark.sql(f"""
         CREATE TABLE IF NOT EXISTS {T_FIRMS_SILVER} (
             id BIGINT, acq_datetime TIMESTAMP,
