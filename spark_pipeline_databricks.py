@@ -65,7 +65,8 @@ _6H_S = 21_600     # 6 hours in seconds
 _1KM_M = 1_006.0   # 1 km + 0.6% for Haversine/WGS-84 meridional-radius divergence
 
 # Join constants (identical to spark_pipeline.py)
-_25KM_M    = 25_000.0
+_10KM_M    = 10_000.0    # proximity gate AND scoring denominator (replaces _25KM_M)
+_MIN_FRP_MW = 1.0        # minimum FRP (MW) for correlation — filters sub-thermal noise at join time
 _48H_S     = 48 * 3600   # fire must be observed within 48 h of event midnight (same/next day)
 _6H_BUFFER = 6 * 3600    # small timezone buffer (ACLED event_date is local; FIRMS is UTC)
 _SCORE_H   = 54.0        # temporal-decay denominator = 48 + 6
@@ -178,7 +179,8 @@ def compute_candidates(firms_silver: DataFrame, acled: DataFrame) -> DataFrame:
         F.col("longitude").alias("f_lon"),
         F.col("frp"),
         F.col("confidence"),
-    )
+    ).filter(F.col("frp") >= F.lit(_MIN_FRP_MW))  # drop sub-thermal noise before correlation
+
     g = acled.select(
         F.col("id").alias("acled_event_id"),
         F.col("event_datetime").alias("g_dt"),
@@ -191,7 +193,7 @@ def compute_candidates(firms_silver: DataFrame, acled: DataFrame) -> DataFrame:
         F.col("source_url").alias("event_source_url"),
     )
 
-    lat_margin = 0.225  # 25 km in degrees latitude
+    lat_margin = 0.090  # 10 km in degrees latitude
     lon_margin = F.least(
         F.lit(lat_margin) / F.cos(F.radians(F.col("f_lat"))),
         F.lit(5.0),  # cap at 5° for polar/high-latitude cases
@@ -217,7 +219,7 @@ def compute_candidates(firms_silver: DataFrame, acled: DataFrame) -> DataFrame:
                 F.col("g_lat"), F.col("g_lon"),
             ).cast(FloatType()),
         )
-        .filter(F.col("distance_m") <= _25KM_M)
+        .filter(F.col("distance_m") <= _10KM_M)
     )
 
     with_time = with_dist.withColumn(
@@ -231,7 +233,7 @@ def compute_candidates(firms_silver: DataFrame, acled: DataFrame) -> DataFrame:
             F.least(F.coalesce(F.col("frp").cast("double"), F.lit(0.0)) / 300.0, F.lit(1.0))
             * F.when(F.col("confidence") == "h", F.lit(1.0)).otherwise(F.lit(0.8))
             * F.least(F.coalesce(F.col("num_sources"), F.lit(1)).cast("double") / 3.0, F.lit(1.0))
-            * F.sqrt(F.lit(1.0) - F.col("distance_m").cast("double") / _25KM_M)
+            * F.sqrt(F.lit(1.0) - F.col("distance_m").cast("double") / _10KM_M)
             * (F.lit(1.0) - F.abs(F.col("time_delta_h").cast("double")) / _SCORE_H)
         ).cast(FloatType()),
     )
@@ -389,24 +391,64 @@ def build_serving_view() -> None:
     """
     Gold serving view for Power BI: every deduped fire and every conflict event,
     surfaced even when unmatched. Three record types UNIONed on a common schema:
-      'matched'    — a fire paired with an event (one row per correlation pair)
-      'fire_only'  — a deduped fire with no correlated event
-      'event_only' — a conflict event with no correlated fire
+      'matched'    — best-scoring fire per ACLED event with score_display >= 2 (archival floor)
+      'fire_only'  — fire with no above-threshold correlation
+      'event_only' — conflict event with no above-threshold correlation
     `map_lat`/`map_lon` give a single point to plot regardless of record type.
+    `score_display` = score × 1000 (alert ≥ 20, archive ≥ 2).
+
+    Jitter strategy: ROW_NUMBER-based, not hash-based.
+    Hash jitter fails for dense coordinate groups (Gaza has 40 events at the same
+    lat/lon; birthday paradox gives ~88% collision rate with 21 buckets). Instead,
+    all displayable event points (matched + event_only) at the same base coordinate
+    share a sequential rank, then spread on a centered 10×10 grid at 0.001° steps
+    (±0.0045° per axis, ≈ ±500 m). This guarantees zero duplicates for up to 100
+    events per coordinate. matched and event_only pool their ranks together so a
+    matched Gaza event and an event_only Gaza event can never land on the same tile.
+    fire_only uses the same ROW_NUMBER approach within each fire pixel.
     """
     spark.sql(f"""
         CREATE OR REPLACE VIEW {V_GOLD_MAP} AS
-        WITH matched AS (
+        WITH matched_ranked AS (
+            SELECT *,
+                ROW_NUMBER() OVER (PARTITION BY acled_event_id ORDER BY score DESC) AS _rn
+            FROM {T_CORR_GOLD}
+        ),
+        best_matches AS (
+            SELECT * FROM matched_ranked WHERE _rn = 1 AND score >= 0.002
+        ),
+        matched_ids AS (
+            SELECT acled_event_id FROM best_matches
+        ),
+        -- Pool matched + event_only events so ranks are assigned across both types
+        -- at each coordinate (prevents cross-type collisions in dense areas like Gaza).
+        displayable_events AS (
+            SELECT acled_event_id AS eid, event_lat AS base_lat, event_lon AS base_lon
+            FROM best_matches
+            UNION ALL
+            SELECT g.id, g.latitude, g.longitude
+            FROM {T_ACLED_BRONZE} g
+            LEFT ANTI JOIN matched_ids ON g.id = matched_ids.acled_event_id
+        ),
+        jittered_events AS (
+            SELECT eid, base_lat, base_lon,
+                CAST(ROW_NUMBER() OVER (PARTITION BY base_lat, base_lon ORDER BY eid) - 1 AS BIGINT) AS _rank
+            FROM displayable_events
+        ),
+        matched AS (
             SELECT
                 'matched'          AS record_type,
-                firms_detection_id, fire_acq_datetime, fire_frp, fire_confidence,
-                fire_lat,  fire_lon,
-                acled_event_id,    event_datetime,     event_sub_event_type,
-                event_description, event_fullname,    event_source_url,   event_num_sources,
-                event_lat, event_lon,
-                distance_m, time_delta_h, score,
-                fire_lat AS map_lat, fire_lon AS map_lon
-            FROM {T_CORR_GOLD}
+                bm.firms_detection_id, bm.fire_acq_datetime, bm.fire_frp, bm.fire_confidence,
+                bm.fire_lat,  bm.fire_lon,
+                bm.acled_event_id,    bm.event_datetime,     bm.event_sub_event_type,
+                bm.event_description, bm.event_fullname,    bm.event_source_url,   bm.event_num_sources,
+                bm.event_lat, bm.event_lon,
+                bm.distance_m, bm.time_delta_h, bm.score,
+                bm.score * 1000 AS score_display,
+                je.base_lat + CAST(je._rank % 10 AS DOUBLE) * 0.001 - 0.0045 AS map_lat,
+                je.base_lon + CAST(je._rank / 10 AS DOUBLE) * 0.001 - 0.0045 AS map_lon
+            FROM best_matches bm
+            JOIN jittered_events je ON bm.acled_event_id = je.eid
         ),
         fire_only AS (
             SELECT
@@ -429,10 +471,11 @@ def build_serving_view() -> None:
                 CAST(NULL AS FLOAT)      AS distance_m,
                 CAST(NULL AS FLOAT)      AS time_delta_h,
                 CAST(NULL AS FLOAT)      AS score,
-                f.latitude               AS map_lat,
-                f.longitude              AS map_lon
+                CAST(NULL AS FLOAT)      AS score_display,
+                f.latitude  + CAST((ROW_NUMBER() OVER (PARTITION BY f.latitude, f.longitude ORDER BY f.id) - 1) % 10 AS DOUBLE) * 0.001 - 0.0045 AS map_lat,
+                f.longitude + CAST((ROW_NUMBER() OVER (PARTITION BY f.latitude, f.longitude ORDER BY f.id) - 1) / 10 AS DOUBLE) * 0.001 - 0.0045 AS map_lon
             FROM {T_FIRMS_SILVER} f
-            LEFT ANTI JOIN {T_CORR_GOLD} c ON f.id = c.firms_detection_id
+            LEFT ANTI JOIN matched m ON f.id = m.firms_detection_id
         ),
         event_only AS (
             SELECT
@@ -455,10 +498,12 @@ def build_serving_view() -> None:
                 CAST(NULL AS FLOAT)      AS distance_m,
                 CAST(NULL AS FLOAT)      AS time_delta_h,
                 CAST(NULL AS FLOAT)      AS score,
-                g.latitude               AS map_lat,
-                g.longitude              AS map_lon
+                CAST(NULL AS FLOAT)      AS score_display,
+                je.base_lat + CAST(je._rank % 10 AS DOUBLE) * 0.001 - 0.0045 AS map_lat,
+                je.base_lon + CAST(je._rank / 10 AS DOUBLE) * 0.001 - 0.0045 AS map_lon
             FROM {T_ACLED_BRONZE} g
-            LEFT ANTI JOIN {T_CORR_GOLD} c ON g.id = c.acled_event_id
+            LEFT ANTI JOIN matched_ids ON g.id = matched_ids.acled_event_id
+            JOIN jittered_events je ON g.id = je.eid
         )
         SELECT * FROM matched
         UNION ALL SELECT * FROM fire_only
@@ -491,7 +536,10 @@ def verify() -> None:
     print(f"2. firms_silver dup pairs:     {dup_pairs}{dup_flag}")
     print(f"3. fire_event_correlations:    {n_corr:,}")
     if stats and stats["mn"] is not None:
-        print(f"4. Score: min={stats['mn']:.4f}  avg={stats['av']:.4f}  max={stats['mx']:.4f}")
+        print(
+            f"4. Score (raw): min={stats['mn']:.4f}  avg={stats['av']:.4f}  max={stats['mx']:.4f}"
+            f"  |  display (×1000): min={stats['mn']*1000:.1f}  avg={stats['av']*1000:.1f}  max={stats['mx']*1000:.1f}"
+        )
     else:
         print("4. Score: no rows")
 

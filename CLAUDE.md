@@ -4,34 +4,157 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 # Project: Fire-Event Correlation Pipeline
 Correlates NASA FIRMS satellite fire/thermal-anomaly detections with
-ACLED-reported combat/strike events near critical infrastructure, using PostGIS for
-spatial joins. Final MVP: an interactive global map dashboard showing deduplicated
-fire detections; hovering a point surfaces any correlated military strike/action with score and news headlines/source links.
-Fires with no matched event and events with no matched fire should both be surfaced.
-The map includes a timeline scrubber for rewinding.
+ACLED-reported combat/strike events near critical infrastructure.
+Final MVP: an interactive global map dashboard showing only confirmed correlated
+strike events; hovering a point surfaces the matched military action with
+score, event description, and source links. The map includes a timeline scrubber.
 
 # Scope
 Two theaters only: **Russia/Ukraine + the Middle East**. FIRMS fire data and ACLED conflict
 events are both restricted to these regions — FIRMS via the regional/country bboxes in
 `firms_ingest.py`, ACLED via the `country=` API filter in `acled_ingest.py`.
 
-# Current Phase — ACTIVE TASK: replace GDELT with ACLED + narrow to 2 theaters
+**Date range: 2022-02-01 to present** (start of Russia-Ukraine war). ACLED Research-tier
+access has a ~1-year publication lag, so the practical ceiling for ACLED data is ~today − 1 year.
+FIRMS SP archive products cover any date, with no embargo.
 
-GDELT is being removed as the conflict-event source. It geocodes to city centroids
-(~24 km off the fire), mislabels events (CAMEO false positives — a California wildfire once
-matched a "fight"), and carries no event description — only a place name + URL. **ACLED**
-replaces it: human-coded strike events with precise coordinates, a real `notes` description,
-and a clean strike taxonomy. Scope narrows from 39 countries to **Russia/Ukraine + the
-Middle East**.
+---
 
-**Guiding constraint: minimal changes** — keep the correlation join, the scoring formula, and
-the Power BI serving view; swap only the *ingest layer* and remap columns. The one structural
-change: the conflict-event table is **properly renamed `gdelt_events` → `acled_events`** (and
-its FK `gdelt_event_id` → `acled_event_id`), not repurposed under the old GDELT name. The
-Databricks Delta medallion + Airflow + Power BI runtime (described below) is already in place
-and stays as-is — only the conflict-event source feeding it changes.
+# Current Phase — ACTIVE TASKS (next session picks up here)
 
-## ACLED API contract (Research-tier access — obtainable via institutional email)
+The ACLED migration is complete and the algorithm has been tuned. Four tasks remain:
+
+## Task 1 — Remove PostgreSQL entirely
+
+**Why:** Postgres/PostGIS is used only as a local staging layer. Its sole PostGIS-specific
+operation (incremental spatial dedup via `ST_DWithin`) is already superseded by the Spark
+`satellite_pass_dedup` that runs every job. Removing Postgres simplifies the stack to:
+ingest scripts → Parquet → UC Volume → Databricks job.
+
+**What changes:**
+- **`firms_ingest.py`** — remove all psycopg2/PostGIS logic. Keep CSV fetch, parse, filter
+  (confidence, bbox). Write output directly as Parquet, upload to
+  `/Volumes/workspace/fire_pipeline/bronze_inbound/firms_detections/`. The 1 km / 6 h
+  incremental dedup (currently a PostGIS NOT EXISTS) is dropped — `satellite_pass_dedup`
+  in the Spark job handles dedup more aggressively and correctly.
+- **`acled_ingest.py`** — remove psycopg2. Keep OAuth fetch + parse + filter. Write Parquet,
+  upload to `/Volumes/workspace/fire_pipeline/bronze_inbound/acled_events/`. ACLED dedup on
+  `global_event_id` is already handled by the Delta MERGE in the Databricks job.
+- **`export_bronze.py`** — delete (superseded; ingest scripts now write directly to Volume).
+- **`schema.sql`** — delete (no Postgres).
+- **`spark_pipeline.py`** — delete or retire to `/archive/`. The local Postgres fallback is
+  no longer meaningful without a DB.
+- **`docker-compose.yml`** — remove the `db` (Postgres) service. Keep Airflow only.
+- **`dags/fire_event_pipeline.py`** — remove `ingest_firms`, `ingest_acled`, `export_bronze`
+  tasks (they now run locally and upload directly). DAG collapses to:
+  `run_databricks_job ──► validate_pipeline`.
+- **`.env`** — remove `DATABASE_URL`. Keep `EARTHDATA_TOKEN`, `ACLED_USERNAME`,
+  `ACLED_PASSWORD`, `DATABRICKS_HOST`, `DATABRICKS_TOKEN`.
+
+**New ingest script pattern** (same for both):
+```python
+# fetch → parse → filter → write Parquet → upload to UC Volume
+df.to_parquet(tmp_path, index=False, coerce_timestamps="us")
+w.files.upload(f"{VOLUME_PATH}/firms_detections/firms_detections.parquet", fh, overwrite=True)
+```
+Reuse the upload helper already in `export_bronze.py` before deleting it.
+
+## Task 2 — Column renames
+
+Two columns have misleading names; rename everywhere (Delta DDL, Python select aliases,
+serving view SQL):
+
+| Old name | New name | Location | Why |
+|---|---|---|---|
+| `source_url` | `source` | `acled_events` table, gold denorm, serving view | ACLED `source` field is a list of outlet names, not URLs |
+| `event_fullname` | `event_location_full_name` | gold `fire_event_correlations`, serving view | Matches the ACLED field semantics (full location name, e.g. "Kherson, Kherson, Ukraine") |
+
+In `spark_pipeline_databricks.py`:
+- `compute_candidates()`: `F.col("source_url").alias("event_source_url")` →
+  `F.col("source").alias("event_source")`  (note: acled_events column is `source` after rename)
+- `compute_candidates()`: `F.col("action_geo_fullname").alias("event_fullname")` →
+  `F.col("action_geo_fullname").alias("event_location_full_name")`
+- Gold table DDL in `ensure_namespace()`: rename those two columns
+- `build_serving_view()`: update column references
+
+In `acled_ingest.py`: rename the insert column `source_url` → `source`.
+
+**Note:** the underlying ACLED API field mapping is unchanged — `source` (";"-split string
+from ACLED) → count into `num_sources`, names into `source` (was `source_url`).
+
+## Task 3 — Serving view: matched records only
+
+Drop `fire_only` and `event_only` from `gold_fire_event_map`. The map shows only confirmed
+correlations (score_display ≥ 2). Unmatched fires and unmatched events are not surfaced.
+
+In `build_serving_view()`, remove `displayable_events`, `jittered_events`,
+`fire_only`, and `event_only` CTEs. The view becomes:
+
+```sql
+CREATE OR REPLACE VIEW gold_fire_event_map AS
+WITH matched_ranked AS (
+    SELECT *, ROW_NUMBER() OVER (PARTITION BY acled_event_id ORDER BY score DESC) AS _rn
+    FROM fire_event_correlations
+),
+best_matches AS (
+    SELECT * FROM matched_ranked WHERE _rn = 1 AND score >= 0.002
+),
+jittered AS (
+    -- ROW_NUMBER jitter within each base coordinate (guaranteed unique; handles
+    -- dense areas like Gaza with 40 events at the same lat/lon)
+    SELECT *, CAST(ROW_NUMBER() OVER (PARTITION BY event_lat, event_lon ORDER BY acled_event_id) - 1 AS BIGINT) AS _rank
+    FROM best_matches
+)
+SELECT
+    firms_detection_id, fire_acq_datetime, fire_frp, fire_confidence, fire_lat, fire_lon,
+    acled_event_id, event_datetime, event_sub_event_type,
+    event_description, event_location_full_name, event_source, event_num_sources,
+    event_lat, event_lon, distance_m, time_delta_h, score,
+    score * 1000 AS score_display,
+    event_lat + CAST(_rank % 10 AS DOUBLE) * 0.001 - 0.0045 AS map_lat,
+    event_lon + CAST(_rank / 10 AS DOUBLE) * 0.001 - 0.0045 AS map_lon
+FROM jittered
+```
+
+The jitter places up to 100 events per coordinate on a centered 10×10 grid at ±0.0045° (≈ ±500 m),
+guaranteeing no duplicate `(map_lat, map_lon)` pairs in Power BI.
+
+## Task 4 — Historical backfill: 2022-02-01 to present
+
+The pipeline needs to ingest the full war period, not just a rolling 14-day window.
+
+**FIRMS:** Archive (SP) products are available for any date via `--start`/`--end`. The
+script already auto-selects SP products when date is > 10 days old, and chunks into 5-day
+API requests internally. Run month-by-month to manage memory and upload size:
+```bash
+python firms_ingest.py --start 2022-02-01 --end 2022-02-28
+python firms_ingest.py --start 2022-03-01 --end 2022-03-31
+# ... continue month by month ...
+```
+
+**ACLED:** Research-tier lag means data is available up to ~today − 1 year. Same
+`--start`/`--end` interface. Batch by month:
+```bash
+python acled_ingest.py --start 2022-02-01 --end 2022-02-28
+# ...
+```
+
+**Volume size estimate:** ~40 months × 70K FIRMS rows/month ≈ 2.8 M fire detections;
+~40 months × 7K ACLED events/month ≈ 280 K events. Both are manageable in Delta.
+
+**Strategy:** Run all ingest batches first (they write Parquet locally then upload,
+overwriting the same Volume path each run — or use dated subdirs if keeping individual
+month files). Then trigger the Databricks job once with all data loaded. The Delta MERGE
+is idempotent so re-running is safe.
+
+**Important:** After removing Postgres (Task 1), the ingest scripts no longer have an
+incremental dedup check. For backfill, run each month exactly once. If a month is re-run,
+the Parquet will be overwritten and the Delta MERGE will skip already-existing rows
+(FIRMS merges on `id`; ACLED merges on `global_event_id`).
+
+---
+
+# ACLED API contract (Research-tier — ~1-year lag)
 - **Auth (OAuth):** `POST https://acleddata.com/oauth/token` with
   `grant_type=password, client_id=acled, scope=authenticated, username, password`
   → `access_token` (24 h; refresh 14 d). Send `Authorization: Bearer {token}` on reads.
@@ -40,63 +163,27 @@ and stays as-is — only the conflict-event source feeding it changes.
   `event_date={yyyy-mm-dd}&event_date_where=>`; paginate 5000 rows/call.
 - **Strike filter:** `sub_event_type` ∈ {Air/drone strike, Shelling/artillery/missile attack,
   Remote explosive/landmine/IED}; `geo_precision` 1–2 only.
-- **Credentials:** `ACLED_USERNAME` / `ACLED_PASSWORD` in `.env` **and** `.airflow.env` —
-  never hardcode or commit (same rule as the NASA Earthdata + Databricks tokens).
+- **Credentials:** `ACLED_USERNAME` / `ACLED_PASSWORD` in `.env` — never hardcode or commit.
 
-## Concrete changes — files to change (highlighted)
-- **NEW `acled_ingest.py`** — replaces `gdelt_ingest.py` in the DAG. OAuth + paginated read;
-  RU/UA+ME `country` filter; strike `sub_event_type` filter; remap to `acled_events` (mapping
-  below); derive `num_sources` from the ";"-split `source` field; dedup on `event_id_cnty`.
-  Mirror the structure of `gdelt_ingest.py` (filter → parse → dedup → insert → verify).
-- **`schema.sql`** — **rename `gdelt_events` → `acled_events`**; `global_event_id` → **TEXT**
-  (holds ACLED `event_id_cnty`); add `description` (ACLED `notes`), `event_type`, `sub_event_type`,
-  `fatalities`; drop the unused CAMEO columns. In `fire_event_correlations` rename the FK
-  `gdelt_event_id` → `acled_event_id` (still references the serial `id`).
-- **`firms_ingest.py`** — trim `REGION_BBOXES` to "Eastern Europe / Russia" + "Middle East";
-  trim `COUNTRY_BBOXES` / `_in_conflict_zone` to the RU/UA+ME set; set `LOOKBACK_DAYS = 14`.
-- **`spark_pipeline_databricks.py`** — rename the bronze table to `acled_events` (identifiers
-  `T_GDELT_BRONZE` → `T_ACLED_BRONZE`, `gdelt_event_id` → `acled_event_id`); MERGE key
-  `global_event_id` becomes STRING in `ensure_namespace` / `merge_bronze` / `load_bronze`; map
-  the denormalized event fields in `compute_candidates` to ACLED (`sub_event_type`, `location`,
-  `source`, derived `num_sources`, **+ new `description`** for the tooltip); update
-  `build_serving_view` event columns; recenter the time-window constants (see Scoring).
-- **`spark_pipeline.py`** (local fallback) — same correlation / window changes for parity.
-- **`export_bronze.py`** — rename the `GDELT_SQL` query to `ACLED_SQL` and update its column list to the new `acled_events` schema.
-- **`dags/fire_event_pipeline.py`** — rename the `ingest_gdelt` task to run `acled_ingest.py`.
-- **Retired (keep in-repo, drop from DAG):** `gdelt_ingest.py` — reference/fallback only.
-
-## Column mapping (ACLED → acled_events)
-`event_id_cnty`→`global_event_id` (TEXT) · `event_date` @00:00 UTC→`event_datetime` ·
-`latitude`/`longitude`→same · `sub_event_type`→`sub_event_type` (+display) · `notes`→`description` ·
-`source` (";"-split count)→`num_sources`, names→`source_url` · `location`→`action_geo_fullname` ·
+## Column mapping (ACLED API → acled_events Delta table)
+`event_id_cnty`→`global_event_id` (STRING) · `event_date` @00:00 UTC→`event_datetime` ·
+`latitude`/`longitude`→same · `sub_event_type`→`sub_event_type` · `notes`→`description` ·
+`source` (";"-split count)→`num_sources`, names→`source` · `location`→`action_geo_fullname` ·
 `country`/`iso`→`action_geo_country` · `actor1`/`actor2`→`actor1_name`/`actor2_name` ·
 `fatalities`→`fatalities`.
 
-## Startup — clean slate + 14-day backfill (do this first)
-1. **Wipe all existing data** (the current Bamako/Moscow rows are from the stale-ID bug; start
-   fresh). Postgres bronze:
-   ```bash
-   docker exec satellite_tracking-db-1 psql -U postgres -d satellite_tracking \
-     -c "TRUNCATE firms_detections, acled_events, fire_event_correlations, firms_silver CASCADE"
-   ```
-   Also drop the Databricks Delta tables (`workspace.fire_pipeline.*`) so the new
-   `acled_events` / gold schema is rebuilt fresh.
-2. **Ingest 14 days of both:** `python firms_ingest.py` (LOOKBACK_DAYS=14) and
-   `python acled_ingest.py` (event_date ≥ today−14).
-3. **Run the transform** (local `spark_pipeline.py` or the Databricks job) and verify.
-
-Out of scope: AWS S3/Lambda/Glue (that's a separate, decoupled task), Kafka,
-dbt, Great Expectations.
+---
 
 # Stack
-- Python 3.x, psycopg2, requests
-- Postgres + PostGIS via Docker Compose (local bronze source)
-- PySpark — local mode (`spark_pipeline.py`, fallback) **and** Databricks serverless
-  (`spark_pipeline_databricks.py`, primary) on Delta bronze/silver/gold
-- Apache Airflow 2.9.2 via Docker Compose — orchestrates the Databricks job remotely
+- Python 3.x, requests, pandas, databricks-sdk
+- PySpark — Databricks serverless (`spark_pipeline_databricks.py`, primary)
+- Apache Airflow 2.9.2 via Docker Compose — triggers the Databricks job on schedule
 - Power BI serves the gold layer from a Databricks serverless SQL warehouse
-- ACLED conflict-event source via OAuth API (replaces GDELT) — see Current Phase
-- NASA Earthdata token + ACLED OAuth credentials + Databricks PAT read from `.env` — never hardcode or commit them
+- ACLED conflict-event source via OAuth API (~1-year research lag)
+- NASA Earthdata token + ACLED OAuth + Databricks PAT read from `.env`
+
+**Postgres/PostGIS removed** — was a local staging layer; eliminated in favour of
+direct Parquet upload from ingest scripts to Databricks UC Volume.
 
 ---
 
@@ -104,178 +191,151 @@ dbt, Great Expectations.
 
 ### Start services
 ```bash
-docker compose up -d          # all services (PostGIS + Airflow)
-docker compose up db -d       # PostGIS only (for local script runs)
-docker compose logs -f airflow-scheduler   # tail scheduler logs
+docker compose up -d          # Airflow only (Postgres service removed)
+docker compose logs -f airflow-scheduler
 ```
 
-### Initialize / reset schema
+### Run pipeline scripts
 ```bash
-psql postgresql://postgres:postgres@localhost:5432/satellite_tracking -f schema.sql
-# Wipe data only (keep schema). On Windows (no local psql) run it via the container:
-docker exec satellite_tracking-db-1 psql -U postgres -d satellite_tracking \
-  -c "TRUNCATE firms_detections, acled_events, fire_event_correlations, firms_silver CASCADE"
+python firms_ingest.py          # fetch FIRMS (rolling window), write Parquet → UC Volume
+python acled_ingest.py          # fetch ACLED strikes, write Parquet → UC Volume
+# then trigger spark_pipeline_databricks.py via Databricks Workflows UI or the DAG
 ```
 
-### Run pipeline scripts locally (requires PostGIS running)
+Archive / backfill mode:
 ```bash
-python firms_ingest.py          # fetch FIRMS (14-day, RU/UA+ME), write firms_detections (bronze)
-python acled_ingest.py          # fetch ACLED strike events (14-day, RU/UA+ME), write acled_events (bronze)
-python spark_pipeline.py        # local fallback: dedup → firms_silver; correlate → fire_event_correlations
+python firms_ingest.py --start 2022-02-01 --end 2022-02-28
+python acled_ingest.py --start 2022-02-01 --end 2022-02-28
+# repeat month by month; then trigger Databricks job once
 ```
 
-Archive mode — fetch a specific date range for calibration/backfill (auto-selects SP products):
+Ground-truth calibration dates:
 ```bash
-python firms_ingest.py --start 2024-01-25 --end 2024-01-26   # Jan 25 2024 Tuapse oil refinery
-python firms_ingest.py --start 2024-08-18 --end 2024-08-19   # Aug 18 2024 Proletarsk oil depot
-python firms_ingest.py --start 2025-01-14 --end 2025-01-15   # Jan 14 2025 Kazan Orgsintez
-python firms_ingest.py --start 2025-01-17 --end 2025-01-18   # Jan 17 2025 Lyudinovo oil depot
-python firms_ingest.py --start 2025-01-29 --end 2025-01-30   # Jan 29 2025 Kstovo refinery
-python firms_ingest.py --start 2025-06-01 --end 2025-06-03   # Jun 1 2025 Spiderweb airbases
-python acled_ingest.py --start 2024-01-25 --end 2024-01-25   # (repeat per event)
-python export_bronze.py --all                                 # export all rows after multi-range ingest
+python firms_ingest.py --start 2024-08-18 --end 2024-08-19   # Proletarsk oil depot
+python firms_ingest.py --start 2025-01-17 --end 2025-01-18   # Lyudinovo oil terminal
+python firms_ingest.py --start 2025-06-01 --end 2025-06-03   # Spiderweb airbases
+python acled_ingest.py --start 2024-08-18 --end 2024-08-18   # (repeat per event date)
 ```
 
-### Databricks path (primary — Delta medallion)
-```bash
-python export_bronze.py   # export 14-day bronze windows → Parquet → UC Volume (needs Databricks env)
-# then run the Databricks job (spark_pipeline_databricks.py) via Workflows UI or the DAG
+### Databricks
+Drop Delta tables before a clean rebuild:
+```sql
+DROP TABLE IF EXISTS workspace.fire_pipeline.firms_detections;
+DROP TABLE IF EXISTS workspace.fire_pipeline.acled_events;
+DROP TABLE IF EXISTS workspace.fire_pipeline.firms_silver;
+DROP TABLE IF EXISTS workspace.fire_pipeline.fire_event_correlations;
+DROP VIEW  IF EXISTS workspace.fire_pipeline.gold_fire_event_map;
 ```
-
-**Air gap:** Databricks Free Edition is serverless-only and cannot reach the local Postgres. Bronze
-crosses the gap as files: `export_bronze.py` writes Parquet (dropping PostGIS geom) and uploads to
-a Unity Catalog Volume over HTTPS; the Databricks job MERGEs that Parquet into Delta. Nothing
-connects back to the laptop.
-
-```
-Postgres ──export_bronze.py──► UC Volume Parquet ──Databricks job──► Delta medallion ──► SQL warehouse ──► Power BI
-```
-
-| File | Runs on | Role |
-|---|---|---|
-| `export_bronze.py` | laptop | Postgres 14-day windows → Parquet → UC Volume |
-| `spark_pipeline_databricks.py` | Databricks job | Parquet → bronze Delta → silver → gold + serving view |
-| `dags/fire_event_pipeline.py` | local Airflow | orchestrates ingest → export → trigger job → validate |
+Trigger job: Databricks Workflows UI → `fire_event_pipeline` → Run now.
 
 ### Airflow UI
 - URL: http://localhost:8080 (credentials: admin/admin)
-- DAG: `fire_event_pipeline` — daily 06:00 UTC, max 1 active run
+- DAG: `fire_event_pipeline` — daily 06:00 UTC; tasks: `run_databricks_job ──► validate_pipeline`
 
 ---
 
 ## Architecture
 
-### Data flow
+### Data flow (post-Postgres-removal)
 ```
-NASA FIRMS API (2 VIIRS sources: SNPP + NOAA-20)
+NASA FIRMS API (VIIRS SNPP + NOAA-20, 375m)
     │
-    ▼ firms_ingest.py   (14-day, RU/UA + Middle East bboxes)
-firms_detections          ← Bronze, append-only, 14-day rolling
+    ▼ firms_ingest.py  (parse + filter + Parquet upload)
     │
-    ▼ spark_pipeline.py (satellite_pass_dedup)
-firms_silver              ← Silver, overwritten daily, deduplicated snapshot
-    │
-    ├──────────────────────────────────────┐
-    ▼                                      ▼
-ACLED API (weekly, OAuth)            firms_silver
-    │ acled_ingest.py                      │
-    ▼  (strike sub-event types)            │
-acled_events              ← Bronze         │   (renamed from gdelt_events)
-    │                                      │
-    └──────── spark_pipeline.py ───────────┘
-              (compute_candidates)
-                    │
-                    ▼
-        fire_event_correlations   ← scored pairs, upsert-safe
+    ├──────────────────────────────────────────────────────────────────┐
+    │                                                                  │
+    ▼                                                                  ▼
+UC Volume Parquet                                            UC Volume Parquet
+(firms_detections/)                                         (acled_events/)
+    │                                                                  │
+    └───────────────── spark_pipeline_databricks.py ───────────────────┘
+                        MERGE → bronze Delta
+                        satellite_pass_dedup → firms_silver (Delta)
+                        compute_candidates → fire_event_correlations (Delta)
+                        build_serving_view → gold_fire_event_map (Delta view)
+                                │
+                                ▼
+                     Databricks SQL warehouse ──► Power BI
 ```
 
-### DAG topology
+### DAG topology (post-Postgres-removal)
 ```
-ingest_firms ─┐
-               ├──► export_bronze ──► run_databricks_job ──► validate_pipeline
-ingest_acled ─┘
+run_databricks_job ──► validate_pipeline
 ```
-`export_bronze` ships the 14-day bronze windows to a UC Volume; `run_databricks_job`
-triggers `spark_pipeline_databricks.py` (Delta medallion); `validate_pipeline` queries
-the Databricks SQL warehouse.
+Ingest scripts run locally (or via cron/CI); they upload directly to the UC Volume.
+The DAG no longer needs to orchestrate ingest — just triggers the job and validates.
 
-### Tables
-Local Postgres holds bronze only; silver/gold are Delta in Databricks
-(`workspace.fire_pipeline.*`). The `spark_pipeline_databricks.py` writers replace the
-local `spark_pipeline.py` Postgres path.
+### Tables (all Delta, `workspace.fire_pipeline.*`)
 
-| Table | Layer | Store | Writer | Purpose |
-|---|---|---|---|---|
-| `firms_detections` | Bronze | Postgres → Delta | `firms_ingest.py` → job MERGE | Raw FIRMS detections; incremental dedup at insert |
-| `acled_events` | Bronze | Postgres → Delta | `acled_ingest.py` → job MERGE | ACLED strike events (RU/UA+ME); renamed from `gdelt_events` |
-| `firms_silver` | Silver | Delta | `spark_pipeline_databricks.py` | Deduplicated 14-day snapshot; input to correlation |
-| `fire_event_correlations` | Gold | Delta | `spark_pipeline_databricks.py` | Scored FIRMS×ACLED pairs |
-| `gold_fire_event_map` | Gold | Delta view | `spark_pipeline_databricks.py` | Power BI serving view: matched + fire-only + event-only rows |
+| Table | Layer | Writer | Purpose |
+|---|---|---|---|
+| `firms_detections` | Bronze | job MERGE from Parquet | Raw FIRMS detections |
+| `acled_events` | Bronze | job MERGE from Parquet | ACLED strike events (RU/UA+ME, Feb 2022–) |
+| `firms_silver` | Silver | `satellite_pass_dedup` | Deduplicated snapshot; input to correlation |
+| `fire_event_correlations` | Gold | `compute_candidates` + MERGE | Scored FIRMS×ACLED pairs |
+| `gold_fire_event_map` | Gold view | `build_serving_view` | Power BI: matched records only (score_display ≥ 2) |
 
 ### Key design decisions
 
-**Two-phase dedup (bronze + silver)**
-`firms_ingest.py` performs a lightweight SQL NOT EXISTS check (1 km / ±6h) to prevent
-re-ingesting exact duplicate passes across runs. `spark_pipeline.py` does a more
-aggressive batch dedup with transitivity (grid-bin + Haversine): if B dominates A
-and C, all three collapse to one, even if A and C are far apart. Correlation runs
-against `firms_silver`, not `firms_detections`.
-
-**Staging tables (local `spark_pipeline.py` only)**
-Spark can't write GEOGRAPHY columns directly. The local job writes to `_firms_silver_stage`
-(plain FLOAT lat/lon) and `_fire_event_correlations_stage`, then psycopg2 moves rows to the
-real tables with geom cast and ON CONFLICT handling. The Databricks job has no PostGIS at all:
-it stores plain lat/lon in Delta (Power BI maps from lat/lon) and uses Delta `MERGE` for the
-idempotent silver-overwrite / gold-upsert instead of the staging dance.
+**Single-phase dedup (silver only)**
+With Postgres removed, the incremental NOT EXISTS check is gone. `satellite_pass_dedup`
+(grid-bin + Haversine anti-join, 1 km / 6 h) runs as a batch on every job execution,
+which is more aggressive and correct (handles transitivity). ACLED dedup is handled by
+the Delta MERGE on `global_event_id`.
 
 **Correlation scoring (5-factor multiplicative)**
 ```
-score = (frp/300) × conf_factor × (num_sources/3) × sqrt(1 − dist/25000) × (1 − |Δt_h|/T)
+score = (frp/300) × conf_factor × (num_sources/3) × sqrt(1 − dist/10000) × (1 − |Δt_h|/T)
 ```
-`num_sources` is derived from ACLED's ";"-split `source` field (1–4 typical, so the `/3`
-denominator still holds). Temporal denominator `T = 54` (48 h window + 6 h timezone buffer).
-`Δt_h = event_midnight − fire_time`; in correct matches this is negative (fire after event).
-Score targets (established from ACLED-era ground-truth calibration): ≥0.020 alerting, ≥0.002 archival.
+`num_sources` is derived from ACLED's ";"-split `source` field (1–4 typical).
+Temporal denominator `T = 54` (48 h window + 6 h timezone buffer).
+`Δt_h = event_midnight − fire_time`; negative in correct matches (fire after event).
+Raw score ∈ [0, 1]; serving view exposes `score_display = score × 1000`.
+Score targets (`score_display`): ≥ 20 alerting, ≥ 2 archival.
+FRP minimum: fires with FRP < 1.0 MW are excluded from correlation at join time.
 
 | Component | Formula | Rationale |
 |---|---|---|
 | `frp_score` | `LEAST(frp/300, 1)` | 300 MW ≈ an extreme fire |
-| `conf_factor` | `1.0` high / `0.8` nominal | weight high-confidence detections up |
-| `source_credibility` | `LEAST(num_sources/3, 1)` | conflict reporting is 1–4 sources |
-| `proximity_decay` | `SQRT(1 − dist/25000)` | concave; gentler mid-range, 0 at 25 km |
-| `temporal_decay` | `1 − \|Δt_h\|/54` | linear decay; T=54 (48 h + 6 h timezone buffer) |
+| `conf_factor` | `1.0` high / `0.8` nominal | weight high-confidence detections |
+| `source_credibility` | `LEAST(num_sources/3, 1)` | conflict reporting is 1–4 outlets |
+| `proximity_decay` | `SQRT(1 − dist/10000)` | concave; 0 at 10 km boundary |
+| `temporal_decay` | `1 − |Δt_h|/54` | linear; T=54 (48 h + 6 h timezone buffer) |
 
 **Match definition (FIRMS × ACLED)**
-A pair is valid when distance ≤ 25 km AND `event_midnight ∈ [fire_time − 48 h, fire_time + 6 h]`.
-In practice this means the fire must be detected on the same day or the next day after the ACLED
-event date. The +6 h buffer is a timezone allowance only (ACLED event_date is local time; FIRMS
-`acq_datetime` is UTC — a late-night local strike can appear as early-next-day UTC). `time_delta_h`
-is defined as `event_midnight − fire_time`; valid pairs are ≤ 0 (event before fire), or slightly
-positive only within the timezone buffer. GDELT-style large positive values (event published days
-after fire) are excluded — ACLED records actual event dates, not publication times.
-25 km can be narrowed during recalibration since ACLED `geo_precision` 1–2 is tighter than GDELT's
-city-centroid error. Many-to-many: every valid pair is stored; consumers aggregate (`MAX(score)`).
+A pair is valid when distance ≤ 10 km AND `event_midnight ∈ [fire_time − 48 h, fire_time + 6 h]`.
+ACLED `geo_precision` 1–2 is site-precise (≤ 5 km error); 10 km gives ~4 km safety margin.
+Many-to-many stored in gold; serving view selects best-scoring fire per ACLED event.
+
+**Serving view: matched only**
+`gold_fire_event_map` contains only confirmed correlations (score_display ≥ 2, one row per
+ACLED event). Fire-only and event-only rows are not surfaced. Map coordinates use ACLED
+event lat/lon with ROW_NUMBER-based jitter (10×10 grid at 0.001° steps, ±0.0045°) to
+separate co-located events (e.g., 40 events at the same Gaza coordinate).
 
 **FIRMS source & false-positive filter**
-VIIRS I-Band 375m only — NRT products (lag ~3 h), switching to the SP archive products when
-`DATA_LAG_DAYS > 10`. MODIS and VIIRS 750m are excluded (single schema). `confidence = 'low'`
-is dropped at ingest and never stored (agricultural burns and gas flares skew low-confidence);
-`nominal`/`high` are kept; FRP is stored, not thresholded.
+VIIRS I-Band 375m only — NRT products (lag ~3 h) for recent dates, SP archive products
+for dates > 10 days old (auto-selected by `firms_ingest.py`). `confidence = 'low'` is
+dropped at ingest. FRP stored without threshold at ingest; fires < 1.0 MW filtered at
+correlation time. MODIS and VIIRS 750m excluded.
 
-**Validation benchmarks (ACLED-era, confirmed matches)**
-All four events below are in the local DB and produce correct correlations via `spark_pipeline.py`.
+**Validation benchmarks (confirmed matches, score_display)**
 
-| Event | Date | Score | Dist | FRP | Notes |
+| Event | Date | score_display | Dist | FRP | Notes |
 |---|---|---|---|---|---|
-| Proletarsk oil depot (Rostov) | 2024-08-18 | **0.069** | 5 km | 43.7 MW | Strongest true positive; summer, clear sky; fire burned 2+ days |
-| Dyagilevo airfield (Ryazan) | 2025-06-01 | 0.0045 | 6 km | 5.5 MW | Part of Spiderweb campaign; confirmed air base fuel fire |
-| Lyudinovo oil terminal (Kaluga) | 2025-01-17 | 0.0033 | 1.3 km | 3.4 MW | Winter detection; weak but confirmed |
-| Engels refinery (Saratov) | 2025-01-14 | 0.0020 | 12.6 km | 1.1 MW | Borderline archival threshold; drone debris + fire |
+| Proletarsk oil depot (Rostov) | 2024-08-18 | **~55** | 5 km | 43.7 MW | Strongest true positive; summer, clear sky |
+| Dyagilevo airfield (Ryazan) | 2025-06-01 | ~3.3 | 6 km | 5.5 MW | Spiderweb campaign; confirmed fuel fire |
+| Lyudinovo oil terminal (Kaluga) | 2025-01-17 | ~3.2 | 1.3 km | 3.4 MW | Winter; weak but confirmed |
 
-VIIRS misses (cloud cover): Tuapse Jan 2024 (winter Black Sea), Kazan Jan 2025, Kstovo Jan 2025.
-These are expected sensor gaps, not pipeline failures.
+VIIRS cloud-cover misses (expected, not pipeline failures): Tuapse Jan 2024, Kazan Jan 2025,
+Kstovo Jan 2025.
 
 **`.env`**
-Single secrets file shared by local scripts and the Airflow container. `DATABASE_URL` in `.env`
-points to `localhost:5432` for local runs; the Airflow container overrides it to `db:5432` via
-a hardcoded env var in `docker-compose.yml` (`x-airflow-common-env`).
+```
+EARTHDATA_TOKEN=...
+ACLED_USERNAME=...
+ACLED_PASSWORD=...
+DATABRICKS_HOST=...
+DATABRICKS_TOKEN=...
+```
+`DATABASE_URL` removed (no Postgres). Never hardcode or commit secrets.

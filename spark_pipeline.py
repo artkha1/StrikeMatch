@@ -77,7 +77,8 @@ _6H_S  = 21_600   # 6 hours in seconds
 _1KM_M = 1_006.0  # 1 km + 0.6% for Haversine/WGS-84 meridional-radius divergence
 
 # Join constants
-_25KM_M    = 25_000.0
+_10KM_M    = 10_000.0    # proximity gate AND scoring denominator (replaces _25KM_M)
+_MIN_FRP_MW = 1.0        # minimum FRP (MW) for correlation — filters sub-thermal noise at join time
 _48H_S     = 48 * 3600   # fire must be observed within 48 h of event midnight (same/next day)
 _6H_BUFFER = 6 * 3600    # small timezone buffer (ACLED event_date is local; FIRMS is UTC)
 _SCORE_H   = 54.0        # temporal-decay denominator = 48 + 6
@@ -293,7 +294,8 @@ def compute_candidates(firms_silver: DataFrame, acled: DataFrame) -> DataFrame:
         F.col("longitude").alias("f_lon"),
         F.col("frp"),
         F.col("confidence"),
-    )
+    ).filter(F.col("frp") >= F.lit(_MIN_FRP_MW))  # drop sub-thermal noise before correlation
+
     g = acled.select(
         F.col("id").alias("acled_event_id"),
         F.col("event_datetime").alias("g_dt"),
@@ -302,7 +304,7 @@ def compute_candidates(firms_silver: DataFrame, acled: DataFrame) -> DataFrame:
         F.col("num_sources"),
     )
 
-    lat_margin = 0.225  # 25 km in degrees latitude
+    lat_margin = 0.090  # 10 km in degrees latitude
     lon_margin = F.least(
         F.lit(lat_margin) / F.cos(F.radians(F.col("f_lat"))),
         F.lit(5.0),  # cap at 5° for polar/high-latitude cases
@@ -319,7 +321,7 @@ def compute_candidates(firms_silver: DataFrame, acled: DataFrame) -> DataFrame:
         (F.col("g_dt").cast("long") <= F.col("f_dt").cast("long") + _6H_BUFFER),
     )
 
-    # Exact Haversine — filter to ≤ 25 km
+    # Exact Haversine — filter to ≤ 10 km
     with_dist = (
         bbox_joined
         .withColumn(
@@ -329,7 +331,7 @@ def compute_candidates(firms_silver: DataFrame, acled: DataFrame) -> DataFrame:
                 F.col("g_lat"), F.col("g_lon"),
             ).cast(FloatType()),
         )
-        .filter(F.col("distance_m") <= _25KM_M)
+        .filter(F.col("distance_m") <= _10KM_M)
     )
 
     # Time delta in hours; negative means event was published before the fire was detected.
@@ -338,14 +340,14 @@ def compute_candidates(firms_silver: DataFrame, acled: DataFrame) -> DataFrame:
         ((F.col("g_dt").cast("long") - F.col("f_dt").cast("long")) / 3600.0).cast(FloatType()),
     )
 
-    # Score: identical 5-factor formula to correlate.py, computed in double precision.
+    # Score: 5-factor multiplicative product (see CLAUDE.md).
     scored = with_time.withColumn(
         "score",
         (
             F.least(F.coalesce(F.col("frp").cast("double"), F.lit(0.0)) / 300.0, F.lit(1.0))
             * F.when(F.col("confidence") == "h", F.lit(1.0)).otherwise(F.lit(0.8))
             * F.least(F.coalesce(F.col("num_sources"), F.lit(1)).cast("double") / 3.0, F.lit(1.0))
-            * F.sqrt(F.lit(1.0) - F.col("distance_m").cast("double") / _25KM_M)
+            * F.sqrt(F.lit(1.0) - F.col("distance_m").cast("double") / _10KM_M)
             * (F.lit(1.0) - F.abs(F.col("time_delta_h").cast("double")) / _SCORE_H)
         ).cast(FloatType()),
     )
