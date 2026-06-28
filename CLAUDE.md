@@ -32,30 +32,12 @@ Deleted: `export_bronze.py`, `schema.sql`, `spark_pipeline.py`.
 IDs are stable hash-based values: FIRMS from `hash(acq_datetime, lat, lon, satellite)`,
 ACLED from `hash(global_event_id)` — both via `pd.util.hash_pandas_object`.
 
-## Task 2 — Column renames
+## ~~Task 2 — Column renames~~ ✓ DONE
 
-Two columns have misleading names; rename everywhere (Delta DDL, Python select aliases,
-serving view SQL):
+`source_url` → `source` in `acled_events` DDL, `acled_ingest.py`, gold denorm, serving view.
+`event_fullname` → `event_location_full_name` in gold DDL, `compute_candidates()`, serving view.
 
-| Old name | New name | Location | Why |
-|---|---|---|---|
-| `source_url` | `source` | `acled_events` table, gold denorm, serving view | ACLED `source` field is a list of outlet names, not URLs |
-| `event_fullname` | `event_location_full_name` | gold `fire_event_correlations`, serving view | Matches the ACLED field semantics (full location name, e.g. "Kherson, Kherson, Ukraine") |
-
-In `spark_pipeline_databricks.py`:
-- `compute_candidates()`: `F.col("source_url").alias("event_source_url")` →
-  `F.col("source").alias("event_source")`  (note: acled_events column is `source` after rename)
-- `compute_candidates()`: `F.col("action_geo_fullname").alias("event_fullname")` →
-  `F.col("action_geo_fullname").alias("event_location_full_name")`
-- Gold table DDL in `ensure_namespace()`: rename those two columns
-- `build_serving_view()`: update column references
-
-In `acled_ingest.py`: rename the insert column `source_url` → `source`.
-
-**Note:** the underlying ACLED API field mapping is unchanged — `source` (";"-split string
-from ACLED) → count into `num_sources`, names into `source` (was `source_url`).
-
-## Task 3 — Serving view: matched records only
+## ~~Task 3 — Serving view: matched records only~~ ✓ DONE
 
 Drop `fire_only` and `event_only` from `gold_fire_event_map`. The map shows only confirmed
 correlations (score_display ≥ 2). Unmatched fires and unmatched events are not surfaced.

@@ -147,7 +147,7 @@ def _parse_row(r: dict) -> tuple | None:
         int(r["fatalities"]) if r.get("fatalities") is not None else None, # [11] fatalities
         lat,                                                                # [12] latitude
         lon,                                                                # [13] longitude
-        sources_raw or None,                                                # [14] source_url
+        sources_raw or None,                                                # [14] source
     )
 
 
@@ -158,7 +158,7 @@ _ACLED_COLS = [
     "event_type", "sub_event_type", "description", "num_sources",
     "actor1_name", "actor2_name",
     "action_geo_fullname", "action_geo_country",
-    "fatalities", "latitude", "longitude", "source_url",
+    "fatalities", "latitude", "longitude", "source",
 ]
 
 _DELTA_COL_ORDER = [
@@ -166,7 +166,7 @@ _DELTA_COL_ORDER = [
     "event_type", "sub_event_type", "description", "num_sources",
     "actor1_name", "actor2_name",
     "action_geo_fullname", "action_geo_country",
-    "fatalities", "latitude", "longitude", "source_url", "ingested_at",
+    "fatalities", "latitude", "longitude", "source", "ingested_at",
 ]
 
 

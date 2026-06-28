@@ -18,7 +18,7 @@ Why this differs from spark_pipeline.py (and why it is serverless-safe):
   * No psycopg2 / PostGIS / GEOGRAPHY. Power BI maps from plain lat/lon, so geom is
     dropped. Delta MERGE replaces the staging-table + ON CONFLICT dance.
   * No JDBC read of local Postgres — Databricks cannot reach it. Bronze arrives as
-    Parquet on a Unity Catalog Volume, pushed up by export_bronze.py.
+    Parquet on a Unity Catalog Volume, pushed up by the ingest scripts.
 
 Config via environment / Databricks job parameters (all have defaults):
   FP_CATALOG        default "workspace"
@@ -51,7 +51,7 @@ T_FIRMS_SILVER = f"{_NS}.firms_silver"
 T_CORR_GOLD = f"{_NS}.fire_event_correlations"
 V_GOLD_MAP = f"{_NS}.gold_fire_event_map"
 
-# Parquet drop locations on the Volume (written by export_bronze.py).
+# Parquet drop locations on the Volume (written by firms_ingest.py / acled_ingest.py).
 P_FIRMS = f"{VOLUME_INBOUND}/firms_detections"
 P_ACLED = f"{VOLUME_INBOUND}/acled_events"
 
@@ -189,8 +189,8 @@ def compute_candidates(firms_silver: DataFrame, acled: DataFrame) -> DataFrame:
         F.col("num_sources"),
         F.col("sub_event_type").alias("event_sub_event_type"),
         F.col("description").alias("event_description"),
-        F.col("action_geo_fullname").alias("event_fullname"),
-        F.col("source_url").alias("event_source_url"),
+        F.col("action_geo_fullname").alias("event_location_full_name"),
+        F.col("source").alias("event_source"),
     )
 
     lat_margin = 0.090  # 10 km in degrees latitude
@@ -251,8 +251,8 @@ def compute_candidates(firms_silver: DataFrame, acled: DataFrame) -> DataFrame:
         F.col("g_dt").alias("event_datetime"),
         "event_sub_event_type",
         "event_description",
-        "event_fullname",
-        "event_source_url",
+        "event_location_full_name",
+        "event_source",
         F.col("num_sources").alias("event_num_sources"),
         "distance_m",
         "time_delta_h",
@@ -288,7 +288,7 @@ def ensure_namespace() -> None:
             actor1_name STRING, actor2_name STRING,
             action_geo_fullname STRING, action_geo_country STRING,
             fatalities INT,
-            latitude DOUBLE, longitude DOUBLE, source_url STRING, ingested_at TIMESTAMP
+            latitude DOUBLE, longitude DOUBLE, source STRING, ingested_at TIMESTAMP
         ) USING DELTA
     """)
     spark.sql(f"""
@@ -307,7 +307,7 @@ def ensure_namespace() -> None:
             fire_frp FLOAT, fire_confidence STRING,
             event_lat DOUBLE, event_lon DOUBLE, event_datetime TIMESTAMP,
             event_sub_event_type STRING, event_description STRING,
-            event_fullname STRING, event_source_url STRING, event_num_sources INT,
+            event_location_full_name STRING, event_source STRING, event_num_sources INT,
             distance_m FLOAT, time_delta_h FLOAT, score FLOAT,
             created_at TIMESTAMP
         ) USING DELTA
@@ -389,125 +389,36 @@ def write_gold(candidates: DataFrame) -> None:
 
 def build_serving_view() -> None:
     """
-    Gold serving view for Power BI: every deduped fire and every conflict event,
-    surfaced even when unmatched. Three record types UNIONed on a common schema:
-      'matched'    — best-scoring fire per ACLED event with score_display >= 2 (archival floor)
-      'fire_only'  — fire with no above-threshold correlation
-      'event_only' — conflict event with no above-threshold correlation
-    `map_lat`/`map_lon` give a single point to plot regardless of record type.
-    `score_display` = score × 1000 (alert ≥ 20, archive ≥ 2).
-
-    Jitter strategy: ROW_NUMBER-based, not hash-based.
-    Hash jitter fails for dense coordinate groups (Gaza has 40 events at the same
-    lat/lon; birthday paradox gives ~88% collision rate with 21 buckets). Instead,
-    all displayable event points (matched + event_only) at the same base coordinate
-    share a sequential rank, then spread on a centered 10×10 grid at 0.001° steps
-    (±0.0045° per axis, ≈ ±500 m). This guarantees zero duplicates for up to 100
-    events per coordinate. matched and event_only pool their ranks together so a
-    matched Gaza event and an event_only Gaza event can never land on the same tile.
-    fire_only uses the same ROW_NUMBER approach within each fire pixel.
+    Gold serving view for Power BI: confirmed correlations only (score_display ≥ 2),
+    one row per ACLED event (best-scoring fire). Jitter spreads co-located events
+    on a 10×10 grid at 0.001° steps (±0.0045°, ≈ ±500 m) — handles dense areas
+    like Gaza with 40 events at the same lat/lon. Up to 100 events per coordinate
+    are guaranteed unique (no birthday-paradox collisions vs. hash jitter).
     """
     spark.sql(f"""
         CREATE OR REPLACE VIEW {V_GOLD_MAP} AS
         WITH matched_ranked AS (
-            SELECT *,
-                ROW_NUMBER() OVER (PARTITION BY acled_event_id ORDER BY score DESC) AS _rn
+            SELECT *, ROW_NUMBER() OVER (PARTITION BY acled_event_id ORDER BY score DESC) AS _rn
             FROM {T_CORR_GOLD}
         ),
         best_matches AS (
             SELECT * FROM matched_ranked WHERE _rn = 1 AND score >= 0.002
         ),
-        matched_ids AS (
-            SELECT acled_event_id FROM best_matches
-        ),
-        -- Pool matched + event_only events so ranks are assigned across both types
-        -- at each coordinate (prevents cross-type collisions in dense areas like Gaza).
-        displayable_events AS (
-            SELECT acled_event_id AS eid, event_lat AS base_lat, event_lon AS base_lon
+        jittered AS (
+            -- ROW_NUMBER jitter within each base coordinate (guaranteed unique; handles
+            -- dense areas like Gaza with 40 events at the same lat/lon)
+            SELECT *, CAST(ROW_NUMBER() OVER (PARTITION BY event_lat, event_lon ORDER BY acled_event_id) - 1 AS BIGINT) AS _rank
             FROM best_matches
-            UNION ALL
-            SELECT g.id, g.latitude, g.longitude
-            FROM {T_ACLED_BRONZE} g
-            LEFT ANTI JOIN matched_ids ON g.id = matched_ids.acled_event_id
-        ),
-        jittered_events AS (
-            SELECT eid, base_lat, base_lon,
-                CAST(ROW_NUMBER() OVER (PARTITION BY base_lat, base_lon ORDER BY eid) - 1 AS BIGINT) AS _rank
-            FROM displayable_events
-        ),
-        matched AS (
-            SELECT
-                'matched'          AS record_type,
-                bm.firms_detection_id, bm.fire_acq_datetime, bm.fire_frp, bm.fire_confidence,
-                bm.fire_lat,  bm.fire_lon,
-                bm.acled_event_id,    bm.event_datetime,     bm.event_sub_event_type,
-                bm.event_description, bm.event_fullname,    bm.event_source_url,   bm.event_num_sources,
-                bm.event_lat, bm.event_lon,
-                bm.distance_m, bm.time_delta_h, bm.score,
-                bm.score * 1000 AS score_display,
-                je.base_lat + CAST(je._rank % 10 AS DOUBLE) * 0.001 - 0.0045 AS map_lat,
-                je.base_lon + CAST(je._rank / 10 AS DOUBLE) * 0.001 - 0.0045 AS map_lon
-            FROM best_matches bm
-            JOIN jittered_events je ON bm.acled_event_id = je.eid
-        ),
-        fire_only AS (
-            SELECT
-                'fire_only'              AS record_type,
-                f.id                     AS firms_detection_id,
-                f.acq_datetime           AS fire_acq_datetime,
-                f.frp                    AS fire_frp,
-                f.confidence             AS fire_confidence,
-                f.latitude               AS fire_lat,
-                f.longitude              AS fire_lon,
-                CAST(NULL AS BIGINT)     AS acled_event_id,
-                CAST(NULL AS TIMESTAMP)  AS event_datetime,
-                CAST(NULL AS STRING)     AS event_sub_event_type,
-                CAST(NULL AS STRING)     AS event_description,
-                CAST(NULL AS STRING)     AS event_fullname,
-                CAST(NULL AS STRING)     AS event_source_url,
-                CAST(NULL AS INT)        AS event_num_sources,
-                CAST(NULL AS DOUBLE)     AS event_lat,
-                CAST(NULL AS DOUBLE)     AS event_lon,
-                CAST(NULL AS FLOAT)      AS distance_m,
-                CAST(NULL AS FLOAT)      AS time_delta_h,
-                CAST(NULL AS FLOAT)      AS score,
-                CAST(NULL AS FLOAT)      AS score_display,
-                f.latitude  + CAST((ROW_NUMBER() OVER (PARTITION BY f.latitude, f.longitude ORDER BY f.id) - 1) % 10 AS DOUBLE) * 0.001 - 0.0045 AS map_lat,
-                f.longitude + CAST((ROW_NUMBER() OVER (PARTITION BY f.latitude, f.longitude ORDER BY f.id) - 1) / 10 AS DOUBLE) * 0.001 - 0.0045 AS map_lon
-            FROM {T_FIRMS_SILVER} f
-            LEFT ANTI JOIN matched m ON f.id = m.firms_detection_id
-        ),
-        event_only AS (
-            SELECT
-                'event_only'             AS record_type,
-                CAST(NULL AS BIGINT)     AS firms_detection_id,
-                CAST(NULL AS TIMESTAMP)  AS fire_acq_datetime,
-                CAST(NULL AS FLOAT)      AS fire_frp,
-                CAST(NULL AS STRING)     AS fire_confidence,
-                CAST(NULL AS DOUBLE)     AS fire_lat,
-                CAST(NULL AS DOUBLE)     AS fire_lon,
-                g.id                     AS acled_event_id,
-                g.event_datetime,
-                g.sub_event_type         AS event_sub_event_type,
-                g.description            AS event_description,
-                g.action_geo_fullname    AS event_fullname,
-                g.source_url             AS event_source_url,
-                g.num_sources            AS event_num_sources,
-                g.latitude               AS event_lat,
-                g.longitude              AS event_lon,
-                CAST(NULL AS FLOAT)      AS distance_m,
-                CAST(NULL AS FLOAT)      AS time_delta_h,
-                CAST(NULL AS FLOAT)      AS score,
-                CAST(NULL AS FLOAT)      AS score_display,
-                je.base_lat + CAST(je._rank % 10 AS DOUBLE) * 0.001 - 0.0045 AS map_lat,
-                je.base_lon + CAST(je._rank / 10 AS DOUBLE) * 0.001 - 0.0045 AS map_lon
-            FROM {T_ACLED_BRONZE} g
-            LEFT ANTI JOIN matched_ids ON g.id = matched_ids.acled_event_id
-            JOIN jittered_events je ON g.id = je.eid
         )
-        SELECT * FROM matched
-        UNION ALL SELECT * FROM fire_only
-        UNION ALL SELECT * FROM event_only
+        SELECT
+            firms_detection_id, fire_acq_datetime, fire_frp, fire_confidence, fire_lat, fire_lon,
+            acled_event_id, event_datetime, event_sub_event_type,
+            event_description, event_location_full_name, event_source, event_num_sources,
+            event_lat, event_lon, distance_m, time_delta_h, score,
+            score * 1000 AS score_display,
+            event_lat + CAST(_rank % 10 AS DOUBLE) * 0.001 - 0.0045 AS map_lat,
+            event_lon + CAST(_rank / 10 AS DOUBLE) * 0.001 - 0.0045 AS map_lon
+        FROM jittered
     """)
 
 
@@ -549,7 +460,7 @@ def verify() -> None:
         .select(
             "score", "distance_m", "time_delta_h",
             "fire_lat", "fire_lon", "fire_frp", "fire_confidence",
-            "event_fullname", "event_sub_event_type",
+            "event_location_full_name", "event_sub_event_type",
         )
         .limit(3)
         .collect()
@@ -560,7 +471,7 @@ def verify() -> None:
             print(
                 f"  score={r['score']:.4f}  dist={r['distance_m']:.0f}m  dt={r['time_delta_h']:+.1f}h  "
                 f"({r['fire_lat']:.3f},{r['fire_lon']:.3f})  frp={r['fire_frp'] or 0:.1f}  conf={r['fire_confidence']}  "
-                f"loc={r['event_fullname']}  sub_type={r['event_sub_event_type']}"
+                f"loc={r['event_location_full_name']}  sub_type={r['event_sub_event_type']}"
             )
 
     # Contract assertions — fail the job task on violation (mirrors _validate_pipeline).
@@ -576,7 +487,7 @@ def verify() -> None:
 
 def main() -> None:
     print(f"Phase 4 Databricks pipeline  |  catalog={CATALOG} schema={SCHEMA}")
-    print(f"  source: Volume Parquet at {VOLUME_INBOUND} (date scope set by export_bronze.py)")
+    print(f"  source: Volume Parquet at {VOLUME_INBOUND} (written by firms_ingest.py / acled_ingest.py)")
 
     ensure_namespace()
 
