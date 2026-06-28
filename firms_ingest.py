@@ -13,6 +13,7 @@ import csv
 import os
 import tempfile
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 
@@ -102,18 +103,30 @@ def _date_chunks(start: date, end: date, max_per: int) -> list[tuple[date, int]]
     return chunks
 
 
+def _fetch_chunk(url: str, retries: int = 3, backoff: int = 30) -> list[dict]:
+    for attempt in range(1, retries + 1):
+        try:
+            with requests.get(url, timeout=(10, 300), stream=True) as resp:
+                resp.raise_for_status()
+                if "text/html" in resp.headers.get("Content-Type", ""):
+                    raise ValueError("API returned HTML — check MAP key / product name")
+                return list(csv.DictReader(resp.iter_lines(decode_unicode=True)))
+        except (requests.RequestException, TimeoutError) as exc:
+            if attempt == retries:
+                raise
+            print(f" [retry {attempt}/{retries}: {exc}]", end="", flush=True)
+            time.sleep(backoff)
+    return []  # unreachable
+
+
 def fetch_source(source: str, start: date, end: date, bbox: str) -> list[dict]:
     chunks = _date_chunks(start, end, MAX_DAYS_PER_REQUEST)
     all_rows: list[dict] = []
     print(f"  {source}", end="", flush=True)
     for chunk_start, count in chunks:
         url = f"{FIRMS_BASE}/{FIRMS_MAP_KEY}/{source}/{bbox}/{count}/{chunk_start}/"
-        with requests.get(url, timeout=(10, 300), stream=True) as resp:
-            resp.raise_for_status()
-            if "text/html" in resp.headers.get("Content-Type", ""):
-                raise ValueError(f"API returned HTML — check MAP key / product name")
-            rows = list(csv.DictReader(resp.iter_lines(decode_unicode=True)))
-            all_rows.extend(rows)
+        rows = _fetch_chunk(url)
+        all_rows.extend(rows)
         print(f" {chunk_start}+{count}d({len(rows):,})", end="", flush=True)
     print(f"  => {len(all_rows):,} total")
     return all_rows

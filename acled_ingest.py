@@ -13,6 +13,7 @@ Requires DATABRICKS_HOST, DATABRICKS_TOKEN, DATABRICKS_VOLUME_PATH in .env.
 import argparse
 import os
 import tempfile
+import time
 from datetime import date, datetime, timedelta, timezone
 
 import pandas as pd
@@ -74,23 +75,32 @@ def _get_token() -> str:
 
 # -- Fetch ---------------------------------------------------------------------
 
-def _fetch_page(token: str, country: str, since: str, until: str, page: int) -> list[dict]:
-    resp = requests.get(
-        ACLED_READ_URL,
-        headers={"Authorization": f"Bearer {token}"},
-        params={
-            "_format": "json",
-            "country": country,
-            "event_type": "Explosions/Remote violence",
-            "event_date": f"{since}|{until}",
-            "event_date_where": "BETWEEN",
-            "limit": PAGE_SIZE,
-            "page": page,
-        },
-        timeout=(10, 60),
-    )
-    resp.raise_for_status()
-    return resp.json().get("data", [])
+def _fetch_page(token: str, country: str, since: str, until: str, page: int,
+                retries: int = 3, backoff: int = 30) -> list[dict]:
+    for attempt in range(1, retries + 1):
+        try:
+            resp = requests.get(
+                ACLED_READ_URL,
+                headers={"Authorization": f"Bearer {token}"},
+                params={
+                    "_format": "json",
+                    "country": country,
+                    "event_type": "Explosions/Remote violence",
+                    "event_date": f"{since}|{until}",
+                    "event_date_where": "BETWEEN",
+                    "limit": PAGE_SIZE,
+                    "page": page,
+                },
+                timeout=(10, 60),
+            )
+            resp.raise_for_status()
+            return resp.json().get("data", [])
+        except (requests.RequestException, TimeoutError, ValueError) as exc:
+            if attempt == retries:
+                raise
+            print(f"  [retry {attempt}/{retries} {country} p{page}: {exc}]", flush=True)
+            time.sleep(backoff)
+    return []  # unreachable
 
 
 def _fetch_all(token: str, since: str, until: str) -> list[dict]:
