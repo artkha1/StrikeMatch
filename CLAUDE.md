@@ -140,6 +140,15 @@ the Parquet will be overwritten and the Delta MERGE will skip already-existing r
 
 ---
 
+## CRITICAL: Triggering the Databricks job
+
+The Databricks job task runs `/Workspace/Users/timkhaiet@gmail.com/spark_pipeline_databricks.py`.
+**Before triggering the job, upload the local script to that workspace path** — otherwise the
+job executes the old version. A PreToolUse hook in `.claude/settings.local.json` detects
+uncommitted local changes in `spark_pipeline_databricks.py` and blocks the job trigger if any exist.
+
+---
+
 ## Commands
 
 ### Start services
