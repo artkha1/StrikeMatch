@@ -13,6 +13,7 @@ x-airflow-common:
   volumes:
     - ./dags:/opt/airflow/dags
     - .:/opt/pipeline:ro
+    - ./data:/opt/pipeline/data
     - airflow_logs:/opt/airflow/logs
   depends_on:
     &airflow-common-depends-on

@@ -14,98 +14,9 @@ Two theaters only: **Russia/Ukraine + the Middle East**. FIRMS fire data and ACL
 events are both restricted to these regions — FIRMS via the regional/country bboxes in
 `firms_ingest.py`, ACLED via the `country=` API filter in `acled_ingest.py`.
 
-**Date range: 2022-02-01 to present** (start of Russia-Ukraine war). ACLED Research-tier
-access has a ~1-year publication lag, so the practical ceiling for ACLED data is ~today − 1 year.
+**Date range: 2022-02-01 to today-1 year** (start of Russia-Ukraine war). ACLED Research-tier
+access has a ~1-year publication lag, so the practical ceiling for all data is ~today − 1 year.
 FIRMS SP archive products cover any date, with no embargo.
-
----
-
-# Current Phase — ACTIVE TASKS (next session picks up here)
-
-The ACLED migration is complete and the algorithm has been tuned. Three tasks remain
-(Task 1 is complete):
-
-## ~~Task 1 — Remove PostgreSQL entirely~~ ✓ DONE
-
-Postgres/PostGIS removed. Ingest scripts now write Parquet directly to the UC Volume.
-Deleted: `export_bronze.py`, `schema.sql`, `spark_pipeline.py`.
-IDs are stable hash-based values: FIRMS from `hash(acq_datetime, lat, lon, satellite)`,
-ACLED from `hash(global_event_id)` — both via `pd.util.hash_pandas_object`.
-
-## ~~Task 2 — Column renames~~ ✓ DONE
-
-`source_url` → `source` in `acled_events` DDL, `acled_ingest.py`, gold denorm, serving view.
-`event_fullname` → `event_location_full_name` in gold DDL, `compute_candidates()`, serving view.
-
-## ~~Task 3 — Serving view: matched records only~~ ✓ DONE
-
-Drop `fire_only` and `event_only` from `gold_fire_event_map`. The map shows only confirmed
-correlations (score_display ≥ 2). Unmatched fires and unmatched events are not surfaced.
-
-In `build_serving_view()`, remove `displayable_events`, `jittered_events`,
-`fire_only`, and `event_only` CTEs. The view becomes:
-
-```sql
-CREATE OR REPLACE VIEW gold_fire_event_map AS
-WITH matched_ranked AS (
-    SELECT *, ROW_NUMBER() OVER (PARTITION BY acled_event_id ORDER BY score DESC) AS _rn
-    FROM fire_event_correlations
-),
-best_matches AS (
-    SELECT * FROM matched_ranked WHERE _rn = 1 AND score >= 0.002
-),
-jittered AS (
-    -- ROW_NUMBER jitter within each base coordinate (guaranteed unique; handles
-    -- dense areas like Gaza with 40 events at the same lat/lon)
-    SELECT *, CAST(ROW_NUMBER() OVER (PARTITION BY event_lat, event_lon ORDER BY acled_event_id) - 1 AS BIGINT) AS _rank
-    FROM best_matches
-)
-SELECT
-    firms_detection_id, fire_acq_datetime, fire_frp, fire_confidence, fire_lat, fire_lon,
-    acled_event_id, event_datetime, event_sub_event_type,
-    event_description, event_location_full_name, event_source, event_num_sources,
-    event_lat, event_lon, distance_m, time_delta_h, score,
-    score * 1000 AS score_display,
-    event_lat + CAST(_rank % 10 AS DOUBLE) * 0.001 - 0.0045 AS map_lat,
-    event_lon + CAST(_rank / 10 AS DOUBLE) * 0.001 - 0.0045 AS map_lon
-FROM jittered
-```
-
-The jitter places up to 100 events per coordinate on a centered 10×10 grid at ±0.0045° (≈ ±500 m),
-guaranteeing no duplicate `(map_lat, map_lon)` pairs in Power BI.
-
-## Task 4 — Historical backfill: 2022-02-01 to present
-
-The pipeline needs to ingest the full war period, not just a rolling 14-day window.
-
-**FIRMS:** Archive (SP) products are available for any date via `--start`/`--end`. The
-script already auto-selects SP products when date is > 10 days old, and chunks into 5-day
-API requests internally. Run month-by-month to manage memory and upload size:
-```bash
-python firms_ingest.py --start 2022-02-23 --end 2022-02-28
-python firms_ingest.py --start 2022-03-01 --end 2022-03-31
-# ... continue month by month ...
-```
-
-**ACLED:** Research-tier lag means data is available up to ~today − 1 year. Same
-`--start`/`--end` interface. Batch by month:
-```bash
-python acled_ingest.py --start 2022-02-24 --end 2022-02-28
-# ...
-```
-
-**Volume size estimate:** ~40 months × 70K FIRMS rows/month ≈ 2.8 M fire detections;
-~40 months × 7K ACLED events/month ≈ 280 K events. Both are manageable in Delta.
-
-**Strategy:** Run all ingest batches first (they write Parquet locally then upload,
-overwriting the same Volume path each run — or use dated subdirs if keeping individual
-month files). Then trigger the Databricks job once with all data loaded. The Delta MERGE
-is idempotent so re-running is safe.
-
-**Important:** After removing Postgres (Task 1), the ingest scripts no longer have an
-incremental dedup check. For backfill, run each month exactly once. If a month is re-run,
-the Parquet will be overwritten and the Delta MERGE will skip already-existing rows
-(FIRMS merges on `id`; ACLED merges on `global_event_id`).
 
 ---
 
@@ -129,14 +40,16 @@ the Parquet will be overwritten and the Delta MERGE will skip already-existing r
 ---
 
 # Stack
-- Python 3.x, requests, pandas, databricks-sdk, pyarrow
-- PySpark — Databricks serverless (`spark_pipeline_databricks.py`, primary)
+- Python 3.x, requests, pandas, databricks-sdk, pyarrow (`requirements.txt` — local ingest only)
+- PySpark — Databricks serverless (`spark_pipeline_databricks.py`, primary); **not** in `requirements.txt`
 - Apache Airflow 2.9.2 via Docker Compose — triggers the Databricks job on schedule
 - Power BI serves the gold layer from a Databricks serverless SQL warehouse
 - ACLED conflict-event source via OAuth API (~1-year research lag)
 - NASA FIRMS MAP Key + ACLED OAuth + Databricks PAT read from `.env`
 
 **Postgres/PostGIS removed** — ingest scripts write Parquet directly to the UC Volume.
+
+**Docker Compose services:** `airflow-db` (Postgres 16 metadata store), `airflow-init` (one-shot schema migration + admin user creation), `airflow-scheduler` (LocalExecutor; loads `.env`; mounts `.:/opt/pipeline:ro` so ingest scripts run inside the container), `airflow-webserver` (port 8080). `Dockerfile.airflow` pins `apache-airflow-providers-databricks` under Airflow constraints.
 
 ---
 
@@ -146,6 +59,10 @@ The Databricks job task runs `/Workspace/Users/timkhaiet@gmail.com/spark_pipelin
 **Before triggering the job, upload the local script to that workspace path** — otherwise the
 job executes the old version. A PreToolUse hook in `.claude/settings.local.json` detects
 uncommitted local changes in `spark_pipeline_databricks.py` and blocks the job trigger if any exist.
+
+**Hook logic** (`.claude/hooks/check_databricks_trigger.py`): fires when tool input contains
+`jobs.run_now`, `run_now(job_id`, or `DATABRICKS_JOB_ID`; runs `git diff HEAD -- spark_pipeline_databricks.py`;
+exits with code 2 (block) if changes are detected, 0 (allow) otherwise. Fails open on hook error.
 
 ---
 
@@ -192,11 +109,27 @@ Trigger job: Databricks Workflows UI → `fire_event_pipeline` → Run now.
 
 ### Airflow UI
 - URL: http://localhost:8080 (credentials: admin/admin)
-- DAG: `fire_event_pipeline` — daily 06:00 UTC; tasks: `run_databricks_job ──► validate_pipeline`
+- DAG: `fire_event_pipeline` — daily 06:00 UTC
+- Task graph:
+  ```
+  ingest_firms ─┐
+                 ├──► run_databricks_job ──► validate_pipeline
+  ingest_acled ─┘
+  ```
+  `ingest_firms` and `ingest_acled` run in parallel (BashOperator). `run_databricks_job` uses `DatabricksRunNowOperator`. `validate_pipeline` queries bronze/silver/gold via Databricks SQL warehouse directly.
 
 ---
 
 ## Architecture
+
+### Script function map
+
+| Script | Key functions |
+|---|---|
+| `firms_ingest.py` | `fetch_source` — parallel fetch (one call per VIIRS product+region); `_in_conflict_zone` — spatial bbox filter; `parse_row` — field extraction + low-confidence drop; `_upload` — Parquet write to UC Volume |
+| `acled_ingest.py` | `_get_token` — OAuth; `_fetch_page` — paginated API with retry; `_parse_row` — geo_precision + sub_event_type filter; `_upload` — Parquet write to UC Volume |
+| `spark_pipeline_databricks.py` | `satellite_pass_dedup` — silver dedup (grid-bin + Haversine anti-join, 1 km/6 h); `compute_candidates` — 5-factor scoring spatial-temporal join; `merge_bronze`/`write_silver`/`write_gold`/`build_serving_view` — DDL + idempotent writes; `verify` — pipeline assertions |
+| `dags/fire_event_pipeline.py` | Airflow DAG — see task graph above |
 
 ### Tables (all Delta, `workspace.fire_pipeline.*`)
 
@@ -266,7 +199,6 @@ Kstovo Jan 2025.
 **`.env`** (see `.env.example` for full template)
 ```
 FIRMS_MAP_KEY=...              # get free key at firms.modaps.eosdis.nasa.gov/api/
-DATABASE_URL=postgresql://postgres:postgres@localhost:5432/satellite_tracking
 ACLED_USERNAME=...
 ACLED_PASSWORD=...
 DATA_LAG_DAYS=364              # ACLED research-tier lag in days; 0 for real-time
@@ -279,4 +211,3 @@ FP_CATALOG=workspace           # optional; defaults to "workspace"
 FP_SCHEMA=fire_pipeline        # optional; defaults to "fire_pipeline"
 AIRFLOW_CONN_DATABRICKS_DEFAULT={"conn_type":"databricks","host":"...","password":"..."}
 ```
-After Task 1 (Postgres removal): `DATABASE_URL` is dropped. Never hardcode or commit secrets.

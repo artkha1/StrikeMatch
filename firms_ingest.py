@@ -4,7 +4,7 @@ FIRMS VIIRS I-Band 375m NRT/SP -> Parquet -> Databricks UC Volume.
 Fetch CSVs, filter low-confidence + conflict-zone, write Parquet, upload.
 
 Usage:
-    python firms_ingest.py                              # rolling 14-day window
+    python firms_ingest.py                              # rolling 1-day window
     python firms_ingest.py --start 2025-01-14 --end 2025-01-15  # archive range
 Requires FIRMS_MAP_KEY, DATABRICKS_HOST, DATABRICKS_TOKEN, DATABRICKS_VOLUME_PATH in .env
 """
@@ -30,7 +30,7 @@ VOLUME_PATH = os.environ.get(
 ).rstrip("/")
 FIRMS_BASE = "https://firms.modaps.eosdis.nasa.gov/api/area/csv"
 DATA_LAG_DAYS = int(os.environ.get("DATA_LAG_DAYS", "0"))
-LOOKBACK_DAYS = 14
+LOOKBACK_DAYS = 1
 
 # NRT products serve only the most recent ~10 days; for historical queries use the
 # Standard Processing (SP) archive products, which cover the full VIIRS mission.

@@ -1,0 +1,790 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>StrikeMatch</title>
+
+  <!-- Leaflet -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <!-- Leaflet.markercluster -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css" />
+  <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #f5f4f0;
+      --surface:   #ffffff;
+      --border:    #e2e0da;
+      --text:      #1a1a1a;
+      --muted:     #6b6b6b;
+      --accent:    #c0392b;      /* high-confidence marker */
+      --amber:     #d68910;      /* nominal marker */
+      --header-h:  52px;
+      --sidebar-w: 320px;
+    }
+
+    body {
+      font-family: 'Inter', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* ── Header ─────────────────────────────────────────────── */
+    header {
+      height: var(--header-h);
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      padding: 0 18px;
+      gap: 10px;
+      flex-shrink: 0;
+      z-index: 1000;
+    }
+
+    .header-icon {
+      font-size: 20px;
+      line-height: 1;
+    }
+
+    .header-title {
+      font-size: 15px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      color: var(--text);
+    }
+
+    .header-sub {
+      font-size: 12px;
+      color: var(--muted);
+      font-weight: 400;
+    }
+
+    .header-sep { flex: 1; }
+
+    .header-link {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 12px;
+      color: var(--muted);
+      text-decoration: none;
+      padding: 4px 8px;
+      border-radius: 5px;
+      transition: background 0.15s, color 0.15s;
+    }
+    .header-link:hover { background: var(--bg); color: var(--text); }
+
+    /* ── Body (map + sidebar) ────────────────────────────────── */
+    .body-row {
+      flex: 1;
+      display: flex;
+      overflow: hidden;
+    }
+
+    /* ── Map ─────────────────────────────────────────────────── */
+    #map {
+      flex: 1;
+      z-index: 1;
+    }
+
+    /* ── Sidebar ─────────────────────────────────────────────── */
+    #sidebar {
+      width: var(--sidebar-w);
+      background: var(--surface);
+      border-left: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      flex-shrink: 0;
+    }
+
+    .sidebar-scroll {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    .sidebar-scroll::-webkit-scrollbar { width: 4px; }
+    .sidebar-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+    .section-label {
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      margin-bottom: 10px;
+    }
+
+    /* stat cards */
+    .stats-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .stat-card {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 12px;
+    }
+
+    .stat-value {
+      font-size: 20px;
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      line-height: 1.1;
+    }
+
+    .stat-label {
+      font-size: 10px;
+      color: var(--muted);
+      margin-top: 3px;
+    }
+
+    /* leaderboard */
+    .leaderboard {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .lb-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 9px;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: background 0.12s;
+      border: 1px solid transparent;
+    }
+
+    .lb-row:hover { background: var(--bg); }
+
+    .lb-row.active {
+      background: #fef3f2;
+      border-color: #fca5a5;
+    }
+
+    .lb-rank {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--muted);
+      width: 16px;
+      flex-shrink: 0;
+    }
+
+    .lb-score {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--accent);
+      width: 36px;
+      flex-shrink: 0;
+    }
+
+    .lb-loc {
+      font-size: 11px;
+      color: var(--text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      flex: 1;
+    }
+
+    .lb-date {
+      font-size: 10px;
+      color: var(--muted);
+      flex-shrink: 0;
+    }
+
+    /* filters */
+    .filter-group { display: flex; flex-direction: column; gap: 8px; }
+
+    .filter-check {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+
+    .filter-check input[type="checkbox"] {
+      width: 14px;
+      height: 14px;
+      accent-color: var(--accent);
+      cursor: pointer;
+    }
+
+    .filter-range-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+    }
+
+    .filter-range-row input[type="range"] {
+      flex: 1;
+      accent-color: var(--accent);
+    }
+
+    #score-val {
+      font-weight: 600;
+      width: 30px;
+      text-align: right;
+    }
+
+    /* legend */
+    .legend { display: flex; gap: 14px; }
+
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    .legend-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    .date-input {
+      font-family: 'Inter', sans-serif;
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--text);
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      padding: 6px 10px;
+      cursor: pointer;
+      outline: none;
+      width: 100%;
+      transition: border-color 0.12s, box-shadow 0.12s;
+    }
+    .date-input:hover  { border-color: #c5c2bb; }
+    .date-input:focus  { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(192,57,43,0.12); }
+    .date-input::-webkit-calendar-picker-indicator { opacity: 0.4; cursor: pointer; }
+
+    .date-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+      align-items: center;
+    }
+
+    .date-row-label {
+      font-size: 10px;
+      color: var(--muted);
+      margin-bottom: 3px;
+    }
+
+    #date-reset {
+      font-family: 'Inter', sans-serif;
+      font-size: 11px;
+      color: var(--muted);
+      background: none;
+      border: none;
+      padding: 0;
+      cursor: pointer;
+      text-decoration: underline;
+      text-underline-offset: 2px;
+    }
+    #date-reset:hover { color: var(--text); }
+
+    /* ── Cluster override ────────────────────────────────────── */
+    .marker-cluster-small,
+    .marker-cluster-medium,
+    .marker-cluster-large {
+      background-color: rgba(192, 57, 43, 0.15) !important;
+    }
+    .marker-cluster-small div,
+    .marker-cluster-medium div,
+    .marker-cluster-large div {
+      background-color: rgba(192, 57, 43, 0.7) !important;
+      color: white !important;
+      font-family: 'Inter', sans-serif !important;
+      font-weight: 600 !important;
+      font-size: 11px !important;
+    }
+
+    /* ── Custom popup ────────────────────────────────────────── */
+    .leaflet-popup-content-wrapper {
+      border-radius: 8px !important;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.12) !important;
+      border: 1px solid var(--border) !important;
+      padding: 0 !important;
+      max-width: 300px;
+    }
+
+    .leaflet-popup-content { margin: 0 !important; width: auto !important; }
+
+    .popup-inner {
+      padding: 14px 16px;
+    }
+
+    .popup-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 6px;
+    }
+
+    .popup-location {
+      font-size: 13px;
+      font-weight: 600;
+      line-height: 1.3;
+      flex: 1;
+      padding-right: 10px;
+    }
+
+    .popup-score {
+      font-size: 18px;
+      font-weight: 700;
+      color: var(--accent);
+      flex-shrink: 0;
+    }
+
+    .popup-meta {
+      font-size: 11px;
+      color: var(--muted);
+      margin-bottom: 8px;
+    }
+
+    .popup-desc {
+      font-size: 11px;
+      line-height: 1.5;
+      color: var(--text);
+      margin-bottom: 10px;
+      max-height: 80px;
+      overflow-y: auto;
+    }
+
+    .popup-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+    }
+
+    .chip {
+      font-size: 10px;
+      padding: 2px 7px;
+      border-radius: 20px;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      background: var(--bg);
+    }
+
+    .chip.red { border-color: #fca5a5; color: var(--accent); background: #fef2f2; }
+
+    /* bounce animation */
+    @keyframes bounce {
+      0%, 100% { transform: translateY(0); }
+      30%       { transform: translateY(-18px); }
+      60%       { transform: translateY(-8px); }
+    }
+
+    .bouncing { animation: bounce 0.6s ease; }
+  </style>
+</head>
+<body>
+
+<!-- ── Header ── -->
+<header>
+  <div>
+    <div class="header-title">StrikeMatch</div>
+    <div class="header-sub" id="header-sub">NASA FIRMS satellite fire detections correlated with ACLED combat events · Russia/Ukraine &amp; Middle East</div>
+  </div>
+  <div class="header-sep"></div>
+  <a class="header-link" href="https://github.com/artkha1" target="_blank" rel="noopener">
+    <!-- GitHub SVG -->
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor">
+      <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/>
+    </svg>
+    artkha1
+  </a>
+</header>
+
+<!-- ── Body (map + sidebar) ── -->
+<div class="body-row">
+
+  <div id="map"></div>
+
+  <div id="sidebar">
+    <div class="sidebar-scroll">
+
+      <!-- Stats -->
+      <div>
+        <div class="section-label">Pipeline Stats</div>
+        <div class="stats-grid">
+          <div class="stat-card" style="grid-column: 1 / -1">
+            <div class="stat-value" id="stat-total">—</div>
+            <div class="stat-label">Correlated events</div>
+          </div>
+          <div class="stat-card" style="grid-column: 1 / -1">
+            <div class="stat-value" id="stat-recent">—</div>
+            <div class="stat-label">Events added during last pipeline run</div>
+          </div>
+          <div class="stat-card" style="grid-column: 1 / -1">
+            <div class="stat-value" id="stat-date" style="font-size:14px">—</div>
+            <div class="stat-label">Last pipeline run (UTC)</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Top scores leaderboard -->
+      <div>
+        <div class="section-label">Top correlations</div>
+        <div class="leaderboard" id="leaderboard"></div>
+      </div>
+
+      <!-- Filters -->
+      <div>
+        <div class="section-label">Filters</div>
+        <div class="filter-group">
+          <div>
+            <div class="date-row">
+              <div>
+                <div class="date-row-label">From</div>
+                <input type="date" class="date-input" id="date-from" />
+              </div>
+              <div>
+                <div class="date-row-label">To</div>
+                <input type="date" class="date-input" id="date-to" />
+              </div>
+            </div>
+            <div style="margin-top: 5px; text-align: right;">
+              <button id="date-reset">All time</button>
+            </div>
+          </div>
+          <label class="filter-check">
+            <input type="checkbox" id="f-air" checked />
+            Air / drone strike
+          </label>
+          <label class="filter-check">
+            <input type="checkbox" id="f-shell" checked />
+            Shelling / artillery / missile
+          </label>
+          <div class="filter-range-row">
+            <span>Min score</span>
+            <input type="range" id="score-slider" min="2" max="100" value="2" step="1" />
+            <span id="score-val">2</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Legend -->
+      <div>
+        <div class="section-label">Confidence</div>
+        <div class="legend">
+          <div class="legend-item">
+            <div class="legend-dot" style="background:var(--accent); border: 1.5px solid white; box-shadow: 0 0 0 1px var(--accent);"></div>
+            High
+          </div>
+          <div class="legend-item">
+            <div class="legend-dot" style="background:var(--amber); border: 1.5px solid white; box-shadow: 0 0 0 1px var(--amber);"></div>
+            Nominal
+          </div>
+        </div>
+        <div style="font-size: 10px; color: var(--muted); margin-top: 8px; line-height: 1.5;">
+          Circle size scales with correlation score.
+        </div>
+      </div>
+
+      <!-- About -->
+      <div>
+        <div class="section-label">About</div>
+        <div style="font-size: 11px; color: var(--muted); line-height: 1.6;">
+          StrikeMatch correlates NASA FIRMS satellite fire detections with ACLED-reported
+          combat events near conflict infrastructure. Built by
+          <a href="https://github.com/artkha1" target="_blank" rel="noopener"
+             style="color: var(--text); text-decoration: none; border-bottom: 1px solid var(--border);">artkha1</a>.
+          Data coverage: Feb 2022 onwards, research-tier (~1-year lag).
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+
+<script>
+// ────────────────────────────────────────────────────────────────
+// Config
+// ────────────────────────────────────────────────────────────────
+const DATA_URL     = './data/events.json';
+const METADATA_URL = './data/metadata.json';
+
+// ────────────────────────────────────────────────────────────────
+// Map init
+// ────────────────────────────────────────────────────────────────
+const map = L.map('map', {
+  center: [38, 38],
+  zoom: 5,
+  zoomControl: false,
+});
+
+L.control.zoom({ position: 'bottomleft' }).addTo(map);
+
+L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+  attribution: '&copy; <a href="https://carto.com/">CARTO</a> &copy; <a href="https://www.openstreetmap.org/copyright">OSM</a>',
+  subdomains: 'abcd',
+  maxZoom: 18,
+}).addTo(map);
+
+// ────────────────────────────────────────────────────────────────
+// Marker helpers
+// ────────────────────────────────────────────────────────────────
+function circleOptions(confidence, score) {
+  const color = confidence === 'h' ? '#c0392b' : '#d68910';
+  const radius = Math.max(6, Math.min(6 + Math.sqrt(score || 2) * 1.8, 22));
+  return {
+    radius,
+    fillColor: color,
+    color: 'white',
+    weight: 1.5,
+    fillOpacity: 0.82,
+  };
+}
+
+function fmtDate(iso) {
+  if (!iso) return '—';
+  return iso.slice(0, 10);
+}
+
+function fmtScore(s) {
+  return s !== null && s !== undefined ? s.toFixed(1) : '—';
+}
+
+function popupHtml(e) {
+  const typeChip = `<span class="chip red">${e.event_sub_event_type}</span>`;
+  const confChip = `<span class="chip">${e.fire_confidence === 'h' ? 'High confidence' : 'Nominal'}</span>`;
+  const frpChip  = `<span class="chip">FRP ${e.fire_frp.toFixed(1)} MW</span>`;
+  const srcChip  = `<span class="chip">${e.event_num_sources} source${e.event_num_sources > 1 ? 's' : ''}</span>`;
+  const distChip = `<span class="chip">${(e.distance_m / 1000).toFixed(1)} km apart</span>`;
+  const srcNames = (e.event_source || '').split(';').map(s => s.trim()).filter(Boolean).join(' · ');
+  return `
+    <div class="popup-inner">
+      <div class="popup-header">
+        <div class="popup-location">${e.event_location_full_name}</div>
+        <div class="popup-score">${fmtScore(e.score_display)}</div>
+      </div>
+      <div class="popup-meta">${fmtDate(e.event_datetime)} · ${e.event_sub_event_type}</div>
+      <div class="popup-desc">${e.event_description || ''}</div>
+      <div class="popup-chips">
+        ${typeChip}${confChip}${frpChip}${srcChip}${distChip}
+      </div>
+      ${srcNames ? `<div style="font-size:10px;color:var(--muted);margin-top:8px">${srcNames}</div>` : ''}
+    </div>`;
+}
+
+// ────────────────────────────────────────────────────────────────
+// State
+// ────────────────────────────────────────────────────────────────
+let allEvents = [];
+let dateFrom  = '';
+let dateTo    = '';
+
+const markerCluster = L.markerClusterGroup({
+  maxClusterRadius: 50,
+  showCoverageOnHover: false,
+  spiderfyOnMaxZoom: true,
+});
+map.addLayer(markerCluster);
+
+// marker objects keyed by index
+const markerMap = new Map();
+
+// ────────────────────────────────────────────────────────────────
+// Render markers
+// ────────────────────────────────────────────────────────────────
+const chkAir   = document.getElementById('f-air');
+const chkShell = document.getElementById('f-shell');
+const scoreSlider = document.getElementById('score-slider');
+const scoreVal    = document.getElementById('score-val');
+
+scoreSlider.addEventListener('input', () => {
+  scoreVal.textContent = scoreSlider.value;
+  renderMarkers();
+});
+chkAir.addEventListener('change', renderMarkers);
+chkShell.addEventListener('change', renderMarkers);
+
+function passesFilter(e) {
+  const score = e.score_display || 0;
+  if (score < parseInt(scoreSlider.value, 10)) return false;
+
+  const type = (e.event_sub_event_type || '').toLowerCase();
+  if (!chkAir.checked && type.includes('air')) return false;
+  if (!chkShell.checked && type.includes('shell')) return false;
+
+  // date range
+  const day = (e.event_datetime || '').slice(0, 10);
+  if (dateFrom && day < dateFrom) return false;
+  if (dateTo   && day > dateTo)   return false;
+
+  return true;
+}
+
+function renderMarkers() {
+  markerCluster.clearLayers();
+  markerMap.clear();
+
+  allEvents.forEach((e, idx) => {
+    if (!passesFilter(e)) return;
+
+    const marker = L.circleMarker([e.map_lat, e.map_lon], circleOptions(e.fire_confidence, e.score_display));
+    marker.bindPopup(popupHtml(e), { maxWidth: 300, minWidth: 260 });
+    marker.bindTooltip(
+      `<strong>${e.event_location_full_name}</strong><br>Score: ${fmtScore(e.score_display)} · ${fmtDate(e.event_datetime)}`,
+      { direction: 'right', offset: [10, 0] }
+    );
+    markerMap.set(idx, marker);
+    markerCluster.addLayer(marker);
+  });
+}
+
+// ────────────────────────────────────────────────────────────────
+// Leaderboard
+// ────────────────────────────────────────────────────────────────
+function buildLeaderboard(events) {
+  const top10 = [...events]
+    .sort((a, b) => b.score_display - a.score_display)
+    .slice(0, 10);
+
+  const lb = document.getElementById('leaderboard');
+  lb.innerHTML = '';
+
+  top10.forEach((e, i) => {
+    const origIdx = allEvents.indexOf(e);
+    const row = document.createElement('div');
+    row.className = 'lb-row';
+    row.dataset.idx = origIdx;
+    row.innerHTML = `
+      <span class="lb-rank">${i + 1}</span>
+      <span class="lb-score">${fmtScore(e.score_display)}</span>
+      <span class="lb-loc">${e.event_location_full_name}</span>
+      <span class="lb-date">${fmtDate(e.event_datetime).slice(0, 7)}</span>`;
+
+    row.addEventListener('click', () => {
+      document.querySelectorAll('.lb-row.active').forEach(r => r.classList.remove('active'));
+      row.classList.add('active');
+
+      const marker = markerMap.get(origIdx);
+      if (marker) {
+        map.flyTo([e.map_lat, e.map_lon], 10, { duration: 1.2 });
+        setTimeout(() => {
+          markerCluster.zoomToShowLayer(marker, () => {
+            marker.openPopup();
+            const el = marker.getElement();
+            if (el) {
+              el.style.transition = 'transform 0.15s';
+              el.style.transform = 'scale(1.8)';
+              setTimeout(() => { el.style.transform = 'scale(1)'; }, 180);
+            }
+          });
+        }, 1300);
+      } else {
+        // marker filtered out — fly to coords anyway
+        map.flyTo([e.map_lat, e.map_lon], 10, { duration: 1.2 });
+      }
+    });
+
+    lb.appendChild(row);
+  });
+}
+
+// ────────────────────────────────────────────────────────────────
+// Date pickers
+// ────────────────────────────────────────────────────────────────
+function initDatePickers(events) {
+  const dates = events.map(e => (e.event_datetime || '').slice(0, 10)).filter(Boolean).sort();
+  const minDate = dates[0];
+  const maxDate = dates[dates.length - 1];
+
+  const fromEl  = document.getElementById('date-from');
+  const toEl    = document.getElementById('date-to');
+  const resetEl = document.getElementById('date-reset');
+
+  fromEl.min = minDate; fromEl.max = maxDate; fromEl.value = minDate;
+  toEl.min   = minDate; toEl.max   = maxDate; toEl.value   = maxDate;
+  dateFrom = minDate;
+  dateTo   = maxDate;
+
+  fromEl.addEventListener('change', () => { dateFrom = fromEl.value; renderMarkers(); });
+  toEl.addEventListener('change',   () => { dateTo   = toEl.value;   renderMarkers(); });
+  resetEl.addEventListener('click', () => {
+    dateFrom = minDate; dateTo = maxDate;
+    fromEl.value = minDate; toEl.value = maxDate;
+    renderMarkers();
+  });
+}
+
+// ────────────────────────────────────────────────────────────────
+// Stats
+// ────────────────────────────────────────────────────────────────
+function loadStats(meta, events) {
+  document.getElementById('stat-total').textContent = meta.total_events.toLocaleString();
+  const added = meta.events_added_last_run;
+  document.getElementById('stat-recent').textContent = added != null ? added.toLocaleString() : '—';
+  const d = new Date(meta.last_run_utc);
+  document.getElementById('stat-date').textContent =
+    `${d.toISOString().slice(0, 10)} ${d.toISOString().slice(11, 16)}`;
+
+  // Derive actual data range from events (ACLED has ~364-day lag, so max date ≠ today)
+  const dates = events.map(e => e.event_datetime).filter(Boolean).sort();
+  if (dates.length) {
+    const minYM = dates[0].slice(0, 7);
+    const maxYM = dates[dates.length - 1].slice(0, 7);
+    const range = minYM === maxYM ? minYM : `${minYM} – ${maxYM}`;
+    document.getElementById('header-sub').textContent =
+      `NASA FIRMS × ACLED conflict events · Russia/Ukraine & Middle East · ${range}`;
+  }
+}
+
+// ────────────────────────────────────────────────────────────────
+// Boot
+// ────────────────────────────────────────────────────────────────
+async function boot() {
+  const [eventsRes, metaRes] = await Promise.all([
+    fetch(DATA_URL),
+    fetch(METADATA_URL),
+  ]);
+
+  allEvents = await eventsRes.json();
+  const meta = await metaRes.json();
+
+  loadStats(meta, allEvents);
+  buildLeaderboard(allEvents);
+  initDatePickers(allEvents);
+  renderMarkers();
+}
+
+boot().catch(err => console.error('Failed to load data:', err));
+</script>
+</body>
+</html>

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
 ACLED conflict-event ingestion -> Parquet -> Databricks UC Volume.
-RU/UA + Middle East, strike sub_event_types only, 14-day rolling window.
+RU/UA + Middle East, strike sub_event_types only, 1-day rolling window.
 
 Usage:
-    python acled_ingest.py                              # rolling 14-day window
+    python acled_ingest.py                              # rolling 1-day window
     python acled_ingest.py --start 2025-01-14 --end 2025-01-15  # archive range
 
 Requires ACLED_USERNAME / ACLED_PASSWORD in .env (Research-tier OAuth credentials).
@@ -27,7 +27,7 @@ VOLUME_PATH = os.environ.get(
     "DATABRICKS_VOLUME_PATH", "/Volumes/workspace/fire_pipeline/bronze_inbound"
 ).rstrip("/")
 
-LOOKBACK_DAYS = 14
+LOOKBACK_DAYS = 1
 PAGE_SIZE = 5000
 
 # Free Research-tier accounts trail real-time by ~52 weeks.

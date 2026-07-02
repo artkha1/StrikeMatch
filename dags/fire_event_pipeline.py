@@ -83,7 +83,7 @@ Scope: Russia/Ukraine + Middle East theaters only.
 **Task graph**
 ```
 ingest_firms ─┐
-               ├──► run_databricks_job ──► validate_pipeline
+               ├──► run_databricks_job ──► validate_pipeline ──► export_data
 ingest_acled ─┘
 ```
 
@@ -114,4 +114,10 @@ the Databricks job MERGEs bronze/gold. Schedule: daily at 06:00 UTC.
         python_callable=_validate_pipeline,
     )
 
-    [ingest_firms, ingest_acled] >> run_databricks_job >> validate_pipeline
+    # Export gold view to data/events.json + data/metadata.json for the static dashboard.
+    export_data = BashOperator(
+        task_id="export_data",
+        bash_command=f"cd {PIPELINE_DIR} && python export_data.py",
+    )
+
+    [ingest_firms, ingest_acled] >> run_databricks_job >> validate_pipeline >> export_data
