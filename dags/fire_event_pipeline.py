@@ -125,6 +125,7 @@ the Databricks job MERGEs bronze/gold. Schedule: daily at 06:00 UTC.
     push_data = BashOperator(
         task_id="push_data",
         bash_command=f"""
+            git config --global --add safe.directory {PIPELINE_DIR}
             cd {PIPELINE_DIR}
             git add dashboard/data/events.json dashboard/data/metadata.json
             if ! git diff --cached --quiet; then

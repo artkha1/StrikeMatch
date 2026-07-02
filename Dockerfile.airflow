@@ -1,4 +1,6 @@
 FROM apache/airflow:2.9.2-python3.11
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
 USER airflow
 # Install extra packages under the Airflow 2.9.2 constraint file so pip cannot
 # upgrade (or uninstall) any package that Airflow itself depends on.
