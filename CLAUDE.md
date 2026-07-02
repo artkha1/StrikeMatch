@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Correlates NASA FIRMS satellite fire/thermal-anomaly detections with
 ACLED-reported combat/strike events near critical infrastructure.
 Final MVP: an interactive global map dashboard showing only confirmed correlated
-strike events; hovering a point surfaces the matched military action with
+strike events; hovering a point surfaces the matched military action with 
 score, event description, and source links. The map includes a timeline scrubber.
 
 # Scope
