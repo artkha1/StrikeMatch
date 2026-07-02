@@ -452,7 +452,7 @@
 <header>
   <div>
     <div class="header-title">StrikeMatch</div>
-    <div class="header-sub" id="header-sub">NASA FIRMS satellite fire detections correlated with ACLED combat events · Russia/Ukraine &amp; Middle East</div>
+    <div class="header-sub" id="header-sub">NASA FIRMS satellite fire detections correlated with ACLED combat events &middot; Russia/Ukraine &amp; Middle East</div>
   </div>
   <div class="header-sep"></div>
   <button id="sidebar-toggle" aria-label="Toggle sidebar">
@@ -482,15 +482,15 @@
         <div class="section-label">Pipeline Stats</div>
         <div class="stats-grid">
           <div class="stat-card" style="grid-column: 1 / -1">
-            <div class="stat-value" id="stat-total">—</div>
+            <div class="stat-value" id="stat-total">&mdash;</div>
             <div class="stat-label">Correlated events</div>
           </div>
           <div class="stat-card" style="grid-column: 1 / -1">
-            <div class="stat-value" id="stat-recent">—</div>
+            <div class="stat-value" id="stat-recent">&mdash;</div>
             <div class="stat-label">Events added during last pipeline run</div>
           </div>
           <div class="stat-card" style="grid-column: 1 / -1">
-            <div class="stat-value" id="stat-date" style="font-size:14px">—</div>
+            <div class="stat-value" id="stat-date" style="font-size:14px">&mdash;</div>
             <div class="stat-label">Last pipeline run (UTC)</div>
           </div>
         </div>
@@ -574,7 +574,6 @@
 <!-- Backdrop for mobile sidebar -->
 <div id="sidebar-backdrop"></div>
 
-
 <script>
 // ────────────────────────────────────────────────────────────────
 // Config
@@ -585,9 +584,9 @@ const METADATA_URL = './data/metadata.json';
 // ────────────────────────────────────────────────────────────────
 // Sidebar toggle (mobile)
 // ────────────────────────────────────────────────────────────────
-const sidebarEl  = document.getElementById('sidebar');
-const toggleBtn  = document.getElementById('sidebar-toggle');
-const backdrop   = document.getElementById('sidebar-backdrop');
+const sidebarEl = document.getElementById('sidebar');
+const toggleBtn = document.getElementById('sidebar-toggle');
+const backdrop  = document.getElementById('sidebar-backdrop');
 
 function openSidebar() {
   sidebarEl.classList.add('open');
@@ -602,17 +601,12 @@ function closeSidebar() {
 toggleBtn.addEventListener('click', () => {
   sidebarEl.classList.contains('open') ? closeSidebar() : openSidebar();
 });
-
 backdrop.addEventListener('click', closeSidebar);
 
 // ────────────────────────────────────────────────────────────────
 // Map init
 // ────────────────────────────────────────────────────────────────
-const map = L.map('map', {
-  center: [38, 38],
-  zoom: 5,
-  zoomControl: false,
-});
+const map = L.map('map', { center: [38, 38], zoom: 5, zoomControl: false });
 
 L.control.zoom({ position: 'bottomleft' }).addTo(map);
 
@@ -623,155 +617,131 @@ L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
 }).addTo(map);
 
 // ────────────────────────────────────────────────────────────────
-// Marker helpers
+// Helpers
 // ────────────────────────────────────────────────────────────────
 function circleOptions(confidence, score) {
-  const color = confidence === 'h' ? '#c0392b' : '#d68910';
+  const color  = confidence === 'h' ? '#c0392b' : '#d68910';
   const radius = Math.max(6, Math.min(6 + Math.sqrt(score || 2) * 1.8, 22));
-  return {
-    radius,
-    fillColor: color,
-    color: 'white',
-    weight: 1.5,
-    fillOpacity: 0.82,
-  };
+  return { radius, fillColor: color, color: 'white', weight: 1.5, fillOpacity: 0.82 };
 }
 
-function fmtDate(iso) {
-  if (!iso) return '—';
-  return iso.slice(0, 10);
-}
-
-function fmtScore(s) {
-  return s !== null && s !== undefined ? s.toFixed(1) : '—';
-}
+function fmtScore(s) { return s != null ? s.toFixed(1) : '—'; }
 
 function popupHtml(e) {
-  const typeChip = `<span class="chip red">${e.event_sub_event_type}</span>`;
-  const confChip = `<span class="chip">${e.fire_confidence === 'h' ? 'High confidence' : 'Nominal'}</span>`;
-  const frpChip  = `<span class="chip">FRP ${e.fire_frp.toFixed(1)} MW</span>`;
-  const srcChip  = `<span class="chip">${e.event_num_sources} source${e.event_num_sources > 1 ? 's' : ''}</span>`;
-  const distChip = `<span class="chip">${(e.distance_m / 1000).toFixed(1)} km apart</span>`;
-  const srcNames = (e.event_source || '').split(';').map(s => s.trim()).filter(Boolean).join(' · ');
-  return `
-    <div class="popup-inner">
-      <div class="popup-header">
-        <div class="popup-location">${e.event_location_full_name}</div>
-        <div class="popup-score">${fmtScore(e.score_display)}</div>
-      </div>
-      <div class="popup-meta">${fmtDate(e.event_datetime)} · ${e.event_sub_event_type}</div>
-      <div class="popup-desc">${e.event_description || ''}</div>
-      <div class="popup-chips">
-        ${typeChip}${confChip}${frpChip}${srcChip}${distChip}
-      </div>
-      ${srcNames ? `<div style="font-size:10px;color:var(--muted);margin-top:8px">${srcNames}</div>` : ''}
-    </div>`;
+  const typeChip = '<span class="chip red">' + e.event_sub_event_type + '</span>';
+  const confChip = '<span class="chip">' + (e.fire_confidence === 'h' ? 'High confidence' : 'Nominal') + '</span>';
+  const frpChip  = '<span class="chip">FRP ' + e.fire_frp.toFixed(1) + ' MW</span>';
+  const srcChip  = '<span class="chip">' + e.event_num_sources + ' source' + (e.event_num_sources > 1 ? 's' : '') + '</span>';
+  const distChip = '<span class="chip">' + (e.distance_m / 1000).toFixed(1) + ' km apart</span>';
+  const srcNames = (e.event_source || '').split(';').map(function(s) { return s.trim(); }).filter(Boolean).join(' · ');
+  return '<div class="popup-inner">'
+    + '<div class="popup-header">'
+    +   '<div class="popup-location">' + e.event_location_full_name + '</div>'
+    +   '<div class="popup-score">' + fmtScore(e.score_display) + '</div>'
+    + '</div>'
+    + '<div class="popup-meta">' + e._date + ' · ' + e.event_sub_event_type + '</div>'
+    + '<div class="popup-desc">' + (e.event_description || '') + '</div>'
+    + '<div class="popup-chips">' + typeChip + confChip + frpChip + srcChip + distChip + '</div>'
+    + (srcNames ? '<div style="font-size:10px;color:var(--muted);margin-top:8px">' + srcNames + '</div>' : '')
+    + '</div>';
+}
+
+function debounce(fn, ms) {
+  var t;
+  return function() { clearTimeout(t); t = setTimeout(fn, ms); };
 }
 
 // ────────────────────────────────────────────────────────────────
 // State
 // ────────────────────────────────────────────────────────────────
-let allEvents = [];
-let dateFrom  = '';
-let dateTo    = '';
+var allEvents  = [];
+var allMarkers = [];     // parallel to allEvents, created once at boot
+var dateFrom   = '';
+var dateTo     = '';
+var visibleSet = new Set(); // indices currently in the cluster
 
-const markerCluster = L.markerClusterGroup({
+var markerCluster = L.markerClusterGroup({
   maxClusterRadius: 50,
   showCoverageOnHover: false,
   spiderfyOnMaxZoom: true,
 });
 map.addLayer(markerCluster);
 
-const markerMap = new Map();
-
 // ────────────────────────────────────────────────────────────────
-// Render markers
+// Filtering & rendering
 // ────────────────────────────────────────────────────────────────
-const chkAir      = document.getElementById('f-air');
-const chkShell    = document.getElementById('f-shell');
-const scoreSlider = document.getElementById('score-slider');
-const scoreVal    = document.getElementById('score-val');
+var chkAir      = document.getElementById('f-air');
+var chkShell    = document.getElementById('f-shell');
+var scoreSlider = document.getElementById('score-slider');
+var scoreVal    = document.getElementById('score-val');
 
-scoreSlider.addEventListener('input', () => {
+// renderMarkers is a function declaration so it is hoisted above scheduleRender.
+var scheduleRender = debounce(renderMarkers, 60);
+
+scoreSlider.addEventListener('input', function() {
   scoreVal.textContent = scoreSlider.value;
-  renderMarkers();
+  scheduleRender();
 });
-chkAir.addEventListener('change', renderMarkers);
-chkShell.addEventListener('change', renderMarkers);
+chkAir.addEventListener('change', scheduleRender);
+chkShell.addEventListener('change', scheduleRender);
 
 function passesFilter(e) {
-  const score = e.score_display || 0;
-  if (score < parseInt(scoreSlider.value, 10)) return false;
-
-  const type = (e.event_sub_event_type || '').toLowerCase();
-  if (!chkAir.checked && type.includes('air')) return false;
-  if (!chkShell.checked && type.includes('shell')) return false;
-
-  const day = (e.event_datetime || '').slice(0, 10);
-  if (dateFrom && day < dateFrom) return false;
-  if (dateTo   && day > dateTo)   return false;
-
+  if (e._score < +scoreSlider.value)                          return false;
+  if (!chkAir.checked   && e._typeLow.includes('air'))        return false;
+  if (!chkShell.checked && e._typeLow.includes('shell'))      return false;
+  if (dateFrom && e._date < dateFrom)                         return false;
+  if (dateTo   && e._date > dateTo)                           return false;
   return true;
 }
 
 function renderMarkers() {
   markerCluster.clearLayers();
-  markerMap.clear();
+  visibleSet.clear();
 
-  allEvents.forEach((e, idx) => {
+  var visible = [];
+  allEvents.forEach(function(e, idx) {
     if (!passesFilter(e)) return;
-
-    const marker = L.circleMarker([e.map_lat, e.map_lon], circleOptions(e.fire_confidence, e.score_display));
-    marker.bindPopup(popupHtml(e), { maxWidth: 300, minWidth: 260 });
-    marker.bindTooltip(
-      `<strong>${e.event_location_full_name}</strong><br>Score: ${fmtScore(e.score_display)} · ${fmtDate(e.event_datetime)}`,
-      { direction: 'right', offset: [10, 0] }
-    );
-    markerMap.set(idx, marker);
-    markerCluster.addLayer(marker);
+    visibleSet.add(idx);
+    visible.push(allMarkers[idx]);
   });
+  markerCluster.addLayers(visible);
 }
 
 // ────────────────────────────────────────────────────────────────
 // Leaderboard
 // ────────────────────────────────────────────────────────────────
 function buildLeaderboard(events) {
-  const top10 = [...events]
-    .sort((a, b) => b.score_display - a.score_display)
-    .slice(0, 10);
-
-  const lb = document.getElementById('leaderboard');
+  var top10 = events.slice().sort(function(a, b) { return b.score_display - a.score_display; }).slice(0, 10);
+  var lb = document.getElementById('leaderboard');
   lb.innerHTML = '';
 
-  top10.forEach((e, i) => {
-    const origIdx = allEvents.indexOf(e);
-    const row = document.createElement('div');
+  top10.forEach(function(e, i) {
+    var origIdx = allEvents.indexOf(e);
+    var row = document.createElement('div');
     row.className = 'lb-row';
-    row.dataset.idx = origIdx;
-    row.innerHTML = `
-      <span class="lb-rank">${i + 1}</span>
-      <span class="lb-score">${fmtScore(e.score_display)}</span>
-      <span class="lb-loc">${e.event_location_full_name}</span>
-      <span class="lb-date">${fmtDate(e.event_datetime).slice(0, 7)}</span>`;
+    row.innerHTML = '<span class="lb-rank">' + (i + 1) + '</span>'
+      + '<span class="lb-score">' + fmtScore(e.score_display) + '</span>'
+      + '<span class="lb-loc">'  + e.event_location_full_name + '</span>'
+      + '<span class="lb-date">' + e._date.slice(0, 7) + '</span>';
 
-    row.addEventListener('click', () => {
-      document.querySelectorAll('.lb-row.active').forEach(r => r.classList.remove('active'));
+    row.addEventListener('click', function() {
+      document.querySelectorAll('.lb-row.active').forEach(function(r) { r.classList.remove('active'); });
       row.classList.add('active');
 
-      const isMobile = window.matchMedia('(max-width: 640px)').matches;
+      var isMobile = window.matchMedia('(max-width: 640px)').matches;
       if (isMobile) closeSidebar();
 
-      const marker = markerMap.get(origIdx);
+      var marker = visibleSet.has(origIdx) ? allMarkers[origIdx] : null;
       if (marker) {
         map.flyTo([e.map_lat, e.map_lon], 10, { duration: 1.2 });
-        setTimeout(() => {
-          markerCluster.zoomToShowLayer(marker, () => {
+        setTimeout(function() {
+          markerCluster.zoomToShowLayer(marker, function() {
             marker.openPopup();
-            const el = marker.getElement();
+            var el = marker.getElement();
             if (el) {
               el.style.transition = 'transform 0.15s';
-              el.style.transform = 'scale(1.8)';
-              setTimeout(() => { el.style.transform = 'scale(1)'; }, 180);
+              el.style.transform  = 'scale(1.8)';
+              setTimeout(function() { el.style.transform = 'scale(1)'; }, 180);
             }
           });
         }, isMobile ? 400 : 1300);
@@ -788,22 +758,22 @@ function buildLeaderboard(events) {
 // Date pickers
 // ────────────────────────────────────────────────────────────────
 function initDatePickers(events) {
-  const dates = events.map(e => (e.event_datetime || '').slice(0, 10)).filter(Boolean).sort();
-  const minDate = dates[0];
-  const maxDate = dates[dates.length - 1];
+  var dates   = events.map(function(e) { return e._date; }).filter(Boolean).sort();
+  var minDate = dates[0];
+  var maxDate = dates[dates.length - 1];
 
-  const fromEl  = document.getElementById('date-from');
-  const toEl    = document.getElementById('date-to');
-  const resetEl = document.getElementById('date-reset');
+  var fromEl  = document.getElementById('date-from');
+  var toEl    = document.getElementById('date-to');
+  var resetEl = document.getElementById('date-reset');
 
   fromEl.min = minDate; fromEl.max = maxDate; fromEl.value = minDate;
   toEl.min   = minDate; toEl.max   = maxDate; toEl.value   = maxDate;
   dateFrom = minDate;
   dateTo   = maxDate;
 
-  fromEl.addEventListener('change', () => { dateFrom = fromEl.value; renderMarkers(); });
-  toEl.addEventListener('change',   () => { dateTo   = toEl.value;   renderMarkers(); });
-  resetEl.addEventListener('click', () => {
+  fromEl.addEventListener('change', function() { dateFrom = fromEl.value; renderMarkers(); });
+  toEl.addEventListener('change',   function() { dateTo   = toEl.value;   renderMarkers(); });
+  resetEl.addEventListener('click', function() {
     dateFrom = minDate; dateTo = maxDate;
     fromEl.value = minDate; toEl.value = maxDate;
     renderMarkers();
@@ -815,33 +785,45 @@ function initDatePickers(events) {
 // ────────────────────────────────────────────────────────────────
 function loadStats(meta, events) {
   document.getElementById('stat-total').textContent = meta.total_events.toLocaleString();
-  const added = meta.events_added_last_run;
+  var added = meta.events_added_last_run;
   document.getElementById('stat-recent').textContent = added != null ? added.toLocaleString() : '—';
-  const d = new Date(meta.last_run_utc);
+  var d = new Date(meta.last_run_utc);
   document.getElementById('stat-date').textContent =
-    `${d.toISOString().slice(0, 10)} ${d.toISOString().slice(11, 16)}`;
+    d.toISOString().slice(0, 10) + ' ' + d.toISOString().slice(11, 16);
 
-  const dates = events.map(e => e.event_datetime).filter(Boolean).sort();
+  var dates = events.map(function(e) { return e.event_datetime; }).filter(Boolean).sort();
   if (dates.length) {
-    const minYM = dates[0].slice(0, 7);
-    const maxYM = dates[dates.length - 1].slice(0, 7);
-    const range = minYM === maxYM ? minYM : `${minYM} – ${maxYM}`;
+    var minYM = dates[0].slice(0, 7);
+    var maxYM = dates[dates.length - 1].slice(0, 7);
+    var range = minYM === maxYM ? minYM : minYM + ' – ' + maxYM;
     document.getElementById('header-sub').textContent =
-      `NASA FIRMS × ACLED conflict events · Russia/Ukraine & Middle East · ${range}`;
+      'NASA FIRMS × ACLED conflict events · Russia/Ukraine & Middle East · ' + range;
   }
 }
 
 // ────────────────────────────────────────────────────────────────
-// Boot
+// Boot -- fetch, precompute, build markers once, then render
 // ────────────────────────────────────────────────────────────────
 async function boot() {
-  const [eventsRes, metaRes] = await Promise.all([
-    fetch(DATA_URL),
-    fetch(METADATA_URL),
-  ]);
+  var results  = await Promise.all([fetch(DATA_URL), fetch(METADATA_URL)]);
+  allEvents    = await results[0].json();
+  var meta     = await results[1].json();
 
-  allEvents = await eventsRes.json();
-  const meta = await metaRes.json();
+  // Stamp each event with precomputed filter fields, then create its marker.
+  // bindPopup receives a function so HTML is only built when the popup opens.
+  allMarkers = allEvents.map(function(e) {
+    e._date    = (e.event_datetime || '').slice(0, 10);
+    e._typeLow = (e.event_sub_event_type || '').toLowerCase();
+    e._score   = e.score_display || 0;
+
+    var marker = L.circleMarker([e.map_lat, e.map_lon], circleOptions(e.fire_confidence, e.score_display));
+    marker.bindPopup(function() { return popupHtml(e); }, { maxWidth: 300, minWidth: 260 });
+    marker.bindTooltip(
+      '<strong>' + e.event_location_full_name + '</strong><br>Score: ' + fmtScore(e.score_display) + ' · ' + e._date,
+      { direction: 'right', offset: [10, 0] }
+    );
+    return marker;
+  });
 
   loadStats(meta, allEvents);
   buildLeaderboard(allEvents);
@@ -849,7 +831,7 @@ async function boot() {
   renderMarkers();
 }
 
-boot().catch(err => console.error('Failed to load data:', err));
+boot().catch(function(err) { console.error('Failed to load data:', err); });
 </script>
 </body>
 </html>
