@@ -114,10 +114,29 @@ the Databricks job MERGEs bronze/gold. Schedule: daily at 06:00 UTC.
         python_callable=_validate_pipeline,
     )
 
-    # Export gold view to data/events.json + data/metadata.json for the static dashboard.
+    # Export gold view to dashboard/data/events.json + metadata.json for the static dashboard.
     export_data = BashOperator(
         task_id="export_data",
         bash_command=f"cd {PIPELINE_DIR} && python export_data.py",
     )
 
-    [ingest_firms, ingest_acled] >> run_databricks_job >> validate_pipeline >> export_data
+    # Commit and push updated JSON files so GitHub Pages picks them up.
+    # Requires GH_TOKEN in .env (a GitHub personal access token with contents:write).
+    push_data = BashOperator(
+        task_id="push_data",
+        bash_command=f"""
+            cd {PIPELINE_DIR}
+            git add dashboard/data/events.json dashboard/data/metadata.json
+            if ! git diff --cached --quiet; then
+                GIT_AUTHOR_NAME=Airflow GIT_AUTHOR_EMAIL=airflow@pipeline \\
+                GIT_COMMITTER_NAME=Airflow GIT_COMMITTER_EMAIL=airflow@pipeline \\
+                git commit -m "data: export $(date -u +%Y-%m-%d)"
+                AUTH=$(git remote get-url origin | sed "s|https://|https://x-access-token:${{GH_TOKEN}}@|")
+                git push "$AUTH" HEAD:main
+            else
+                echo "No data changes, skipping push"
+            fi
+        """,
+    )
+
+    [ingest_firms, ingest_acled] >> run_databricks_job >> validate_pipeline >> export_data >> push_data
