@@ -28,8 +28,8 @@
       --border:    #e2e0da;
       --text:      #1a1a1a;
       --muted:     #6b6b6b;
-      --accent:    #c0392b;      /* high-confidence marker */
-      --amber:     #d68910;      /* nominal marker */
+      --accent:    #c0392b;
+      --amber:     #d68910;
       --header-h:  52px;
       --sidebar-w: 320px;
     }
@@ -38,7 +38,7 @@
       font-family: 'Inter', sans-serif;
       background: var(--bg);
       color: var(--text);
-      height: 100vh;
+      height: 100dvh;
       display: flex;
       flex-direction: column;
       overflow: hidden;
@@ -57,10 +57,7 @@
       z-index: 1000;
     }
 
-    .header-icon {
-      font-size: 20px;
-      line-height: 1;
-    }
+    .header-icon { font-size: 20px; line-height: 1; }
 
     .header-title {
       font-size: 15px;
@@ -90,6 +87,21 @@
     }
     .header-link:hover { background: var(--bg); color: var(--text); }
 
+    /* ── Sidebar toggle (mobile only) ────────────────────────── */
+    #sidebar-toggle {
+      display: none;
+      align-items: center;
+      justify-content: center;
+      width: 36px;
+      height: 36px;
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      background: var(--bg);
+      cursor: pointer;
+      color: var(--text);
+      flex-shrink: 0;
+    }
+
     /* ── Body (map + sidebar) ────────────────────────────────── */
     .body-row {
       flex: 1;
@@ -102,6 +114,17 @@
       flex: 1;
       z-index: 1;
     }
+
+    /* ── Backdrop (mobile sidebar overlay) ───────────────────── */
+    #sidebar-backdrop {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.35);
+      z-index: 499;
+      touch-action: none;
+    }
+    #sidebar-backdrop.visible { display: block; }
 
     /* ── Sidebar ─────────────────────────────────────────────── */
     #sidebar {
@@ -117,6 +140,7 @@
     .sidebar-scroll {
       flex: 1;
       overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
       padding: 16px;
       display: flex;
       flex-direction: column;
@@ -163,11 +187,7 @@
     }
 
     /* leaderboard */
-    .leaderboard {
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
-    }
+    .leaderboard { display: flex; flex-direction: column; gap: 4px; }
 
     .lb-row {
       display: flex;
@@ -343,9 +363,7 @@
 
     .leaflet-popup-content { margin: 0 !important; width: auto !important; }
 
-    .popup-inner {
-      padding: 14px 16px;
-    }
+    .popup-inner { padding: 14px 16px; }
 
     .popup-header {
       display: flex;
@@ -384,11 +402,7 @@
       overflow-y: auto;
     }
 
-    .popup-chips {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 4px;
-    }
+    .popup-chips { display: flex; flex-wrap: wrap; gap: 4px; }
 
     .chip {
       font-size: 10px;
@@ -407,8 +421,29 @@
       30%       { transform: translateY(-18px); }
       60%       { transform: translateY(-8px); }
     }
-
     .bouncing { animation: bounce 0.6s ease; }
+
+    /* ── Mobile ──────────────────────────────────────────────── */
+    @media (max-width: 640px) {
+      .header-sub { display: none; }
+
+      #sidebar-toggle { display: flex; }
+
+      #sidebar {
+        position: fixed;
+        right: 0;
+        top: var(--header-h);
+        bottom: 0;
+        width: min(var(--sidebar-w), 100vw);
+        transform: translateX(100%);
+        transition: transform 0.25s ease;
+        z-index: 500;
+        border-left: 1px solid var(--border);
+        box-shadow: -4px 0 20px rgba(0,0,0,0.10);
+      }
+
+      #sidebar.open { transform: translateX(0); }
+    }
   </style>
 </head>
 <body>
@@ -420,18 +455,23 @@
     <div class="header-sub" id="header-sub">NASA FIRMS satellite fire detections correlated with ACLED combat events · Russia/Ukraine &amp; Middle East</div>
   </div>
   <div class="header-sep"></div>
-  <a class="header-link" href="https://github.com/artkha1" target="_blank" rel="noopener">
-    <!-- GitHub SVG -->
+  <button id="sidebar-toggle" aria-label="Toggle sidebar">
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+      <line x1="2" y1="4" x2="14" y2="4"/>
+      <line x1="2" y1="8" x2="14" y2="8"/>
+      <line x1="2" y1="12" x2="14" y2="12"/>
+    </svg>
+  </button>
+  <a class="header-link" href="https://github.com/artkha3" target="_blank" rel="noopener">
     <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor">
       <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/>
     </svg>
-    artkha1
+    artkha3
   </a>
 </header>
 
 <!-- ── Body (map + sidebar) ── -->
 <div class="body-row">
-
   <div id="map"></div>
 
   <div id="sidebar">
@@ -521,8 +561,8 @@
         <div style="font-size: 11px; color: var(--muted); line-height: 1.6;">
           StrikeMatch correlates NASA FIRMS satellite fire detections with ACLED-reported
           combat events near conflict infrastructure. Built by
-          <a href="https://github.com/artkha1" target="_blank" rel="noopener"
-             style="color: var(--text); text-decoration: none; border-bottom: 1px solid var(--border);">artkha1</a>.
+          <a href="https://github.com/artkha3" target="_blank" rel="noopener"
+             style="color: var(--text); text-decoration: none; border-bottom: 1px solid var(--border);">artkha3</a>.
           Data coverage: Feb 2022 onwards, research-tier (~1-year lag).
         </div>
       </div>
@@ -531,6 +571,9 @@
   </div>
 </div>
 
+<!-- Backdrop for mobile sidebar -->
+<div id="sidebar-backdrop"></div>
+
 
 <script>
 // ────────────────────────────────────────────────────────────────
@@ -538,6 +581,29 @@
 // ────────────────────────────────────────────────────────────────
 const DATA_URL     = './data/events.json';
 const METADATA_URL = './data/metadata.json';
+
+// ────────────────────────────────────────────────────────────────
+// Sidebar toggle (mobile)
+// ────────────────────────────────────────────────────────────────
+const sidebarEl  = document.getElementById('sidebar');
+const toggleBtn  = document.getElementById('sidebar-toggle');
+const backdrop   = document.getElementById('sidebar-backdrop');
+
+function openSidebar() {
+  sidebarEl.classList.add('open');
+  backdrop.classList.add('visible');
+}
+
+function closeSidebar() {
+  sidebarEl.classList.remove('open');
+  backdrop.classList.remove('visible');
+}
+
+toggleBtn.addEventListener('click', () => {
+  sidebarEl.classList.contains('open') ? closeSidebar() : openSidebar();
+});
+
+backdrop.addEventListener('click', closeSidebar);
 
 // ────────────────────────────────────────────────────────────────
 // Map init
@@ -616,14 +682,13 @@ const markerCluster = L.markerClusterGroup({
 });
 map.addLayer(markerCluster);
 
-// marker objects keyed by index
 const markerMap = new Map();
 
 // ────────────────────────────────────────────────────────────────
 // Render markers
 // ────────────────────────────────────────────────────────────────
-const chkAir   = document.getElementById('f-air');
-const chkShell = document.getElementById('f-shell');
+const chkAir      = document.getElementById('f-air');
+const chkShell    = document.getElementById('f-shell');
 const scoreSlider = document.getElementById('score-slider');
 const scoreVal    = document.getElementById('score-val');
 
@@ -642,7 +707,6 @@ function passesFilter(e) {
   if (!chkAir.checked && type.includes('air')) return false;
   if (!chkShell.checked && type.includes('shell')) return false;
 
-  // date range
   const day = (e.event_datetime || '').slice(0, 10);
   if (dateFrom && day < dateFrom) return false;
   if (dateTo   && day > dateTo)   return false;
@@ -694,6 +758,9 @@ function buildLeaderboard(events) {
       document.querySelectorAll('.lb-row.active').forEach(r => r.classList.remove('active'));
       row.classList.add('active');
 
+      const isMobile = window.matchMedia('(max-width: 640px)').matches;
+      if (isMobile) closeSidebar();
+
       const marker = markerMap.get(origIdx);
       if (marker) {
         map.flyTo([e.map_lat, e.map_lon], 10, { duration: 1.2 });
@@ -707,9 +774,8 @@ function buildLeaderboard(events) {
               setTimeout(() => { el.style.transform = 'scale(1)'; }, 180);
             }
           });
-        }, 1300);
+        }, isMobile ? 400 : 1300);
       } else {
-        // marker filtered out — fly to coords anyway
         map.flyTo([e.map_lat, e.map_lon], 10, { duration: 1.2 });
       }
     });
@@ -755,7 +821,6 @@ function loadStats(meta, events) {
   document.getElementById('stat-date').textContent =
     `${d.toISOString().slice(0, 10)} ${d.toISOString().slice(11, 16)}`;
 
-  // Derive actual data range from events (ACLED has ~364-day lag, so max date ≠ today)
   const dates = events.map(e => e.event_datetime).filter(Boolean).sort();
   if (dates.length) {
     const minYM = dates[0].slice(0, 7);
