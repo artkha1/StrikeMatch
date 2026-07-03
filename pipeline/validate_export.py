@@ -73,6 +73,16 @@ def _column_checks_ge(df: pd.DataFrame, has_ids: bool) -> list[str]:
     import great_expectations as gx
     import great_expectations.expectations as gxe
 
+    # The context must exist before the suite is built — in GE 1.x,
+    # ExpectationSuite.add_expectation() requires an active project context.
+    context = gx.get_context(mode="ephemeral")
+    batch = (
+        context.data_sources.add_pandas("events")
+        .add_dataframe_asset("events")
+        .add_batch_definition_whole_dataframe("events")
+        .get_batch(batch_parameters={"dataframe": df})
+    )
+
     suite = gx.ExpectationSuite(name="gold_export")
     if has_ids:
         suite.add_expectation(gxe.ExpectColumnValuesToBeUnique(column="global_event_id"))
@@ -85,13 +95,6 @@ def _column_checks_ge(df: pd.DataFrame, has_ids: bool) -> list[str]:
     suite.add_expectation(gxe.ExpectColumnValuesToBeInSet(column="fire_confidence", value_set=["h", "n"]))
     suite.add_expectation(gxe.ExpectColumnValuesToBeInSet(column="event_sub_event_type", value_set=STRIKE_SUBTYPES))
 
-    batch = (
-        gx.get_context(mode="ephemeral")
-        .data_sources.add_pandas("events")
-        .add_dataframe_asset("events")
-        .add_batch_definition_whole_dataframe("events")
-        .get_batch(batch_parameters={"dataframe": df})
-    )
     results = batch.validate(suite)
 
     failures = []
