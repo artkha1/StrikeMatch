@@ -271,7 +271,7 @@ def main() -> None:
         return
 
     df = _build_dataframe(deduped)
-    print(f"\nUploading Parquet to UC Volume...")
+    print("\nUploading Parquet to UC Volume...")
     _upload(df, "acled_events")
     print("Done.")
 

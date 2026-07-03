@@ -11,8 +11,8 @@ Requires FIRMS_MAP_KEY, DATABRICKS_HOST, DATABRICKS_TOKEN, DATABRICKS_VOLUME_PAT
 import argparse
 import csv
 import os
-import tempfile
 import sys
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
@@ -297,7 +297,7 @@ def main() -> None:
         return
 
     df = _build_dataframe(deduped)
-    print(f"\nUploading Parquet to UC Volume...")
+    print("\nUploading Parquet to UC Volume...")
     _upload(df, "firms_detections")
     print("Done.")
 
