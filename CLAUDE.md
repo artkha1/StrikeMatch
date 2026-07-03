@@ -58,10 +58,10 @@ FIRMS SP archive products cover any date, with no embargo.
 The Databricks job task runs `/Workspace/Users/timkhaiet@gmail.com/spark_pipeline_databricks.py`.
 **Before triggering the job, upload the local script to that workspace path** — otherwise the
 job executes the old version. A PreToolUse hook in `.claude/settings.local.json` detects
-uncommitted local changes in `spark_pipeline_databricks.py` and blocks the job trigger if any exist.
+uncommitted local changes in `pipeline/spark_pipeline_databricks.py` and blocks the job trigger if any exist.
 
 **Hook logic** (`.claude/hooks/check_databricks_trigger.py`): fires when tool input contains
-`jobs.run_now`, `run_now(job_id`, or `DATABRICKS_JOB_ID`; runs `git diff HEAD -- spark_pipeline_databricks.py`;
+`jobs.run_now`, `run_now(job_id`, or `DATABRICKS_JOB_ID`; runs `git diff HEAD -- pipeline/spark_pipeline_databricks.py`;
 exits with code 2 (block) if changes are detected, 0 (allow) otherwise. Fails open on hook error.
 
 ---
@@ -76,24 +76,24 @@ docker compose logs -f airflow-scheduler
 
 ### Run pipeline scripts
 ```bash
-python firms_ingest.py          # fetch FIRMS (rolling window), write Parquet → UC Volume
-python acled_ingest.py          # fetch ACLED strikes, write Parquet → UC Volume
+python pipeline/firms_ingest.py          # fetch FIRMS (rolling window), write Parquet → UC Volume
+python pipeline/acled_ingest.py          # fetch ACLED strikes, write Parquet → UC Volume
 # then trigger spark_pipeline_databricks.py via Databricks Workflows UI or the DAG
 ```
 
 Archive / backfill mode:
 ```bash
-python firms_ingest.py --start 2022-02-01 --end 2022-02-28
-python acled_ingest.py --start 2022-02-01 --end 2022-02-28
+python pipeline/firms_ingest.py --start 2022-02-01 --end 2022-02-28
+python pipeline/acled_ingest.py --start 2022-02-01 --end 2022-02-28
 # repeat month by month; then trigger Databricks job once. Start with February 24, 2022 to match Russian invasion of Ukraine
 ```
 
 Ground-truth calibration dates:
 ```bash
-python firms_ingest.py --start 2024-08-18 --end 2024-08-19   # Proletarsk oil depot
-python firms_ingest.py --start 2025-01-17 --end 2025-01-18   # Lyudinovo oil terminal
-python firms_ingest.py --start 2025-06-01 --end 2025-06-03   # Spiderweb airbases
-python acled_ingest.py --start 2024-08-18 --end 2024-08-18   # (repeat per event date)
+python pipeline/firms_ingest.py --start 2024-08-18 --end 2024-08-19   # Proletarsk oil depot
+python pipeline/firms_ingest.py --start 2025-01-17 --end 2025-01-18   # Lyudinovo oil terminal
+python pipeline/firms_ingest.py --start 2025-06-01 --end 2025-06-03   # Spiderweb airbases
+python pipeline/acled_ingest.py --start 2024-08-18 --end 2024-08-18   # (repeat per event date)
 ```
 
 ### Databricks
@@ -126,9 +126,9 @@ Trigger job: Databricks Workflows UI → `fire_event_pipeline` → Run now.
 
 | Script | Key functions |
 |---|---|
-| `firms_ingest.py` | `fetch_source` — parallel fetch (one call per VIIRS product+region); `_in_conflict_zone` — spatial bbox filter; `parse_row` — field extraction + low-confidence drop; `_upload` — Parquet write to UC Volume |
-| `acled_ingest.py` | `_get_token` — OAuth; `_fetch_page` — paginated API with retry; `_parse_row` — geo_precision + sub_event_type filter; `_upload` — Parquet write to UC Volume |
-| `spark_pipeline_databricks.py` | `satellite_pass_dedup` — silver dedup (grid-bin + Haversine anti-join, 1 km/6 h); `compute_candidates` — 5-factor scoring spatial-temporal join; `merge_bronze`/`write_silver`/`write_gold`/`build_serving_view` — DDL + idempotent writes; `verify` — pipeline assertions |
+| `pipeline/firms_ingest.py` | `fetch_source` — parallel fetch (one call per VIIRS product+region); `_in_conflict_zone` — spatial bbox filter; `parse_row` — field extraction + low-confidence drop; `_upload` — Parquet write to UC Volume |
+| `pipeline/acled_ingest.py` | `_get_token` — OAuth; `_fetch_page` — paginated API with retry; `_parse_row` — geo_precision + sub_event_type filter; `_upload` — Parquet write to UC Volume |
+| `pipeline/spark_pipeline_databricks.py` | `satellite_pass_dedup` — silver dedup (grid-bin + Haversine anti-join, 1 km/6 h); `compute_candidates` — 5-factor scoring spatial-temporal join; `merge_bronze`/`write_silver`/`write_gold`/`build_serving_view` — DDL + idempotent writes; `verify` — pipeline assertions |
 | `dags/fire_event_pipeline.py` | Airflow DAG — see task graph above |
 
 ### Tables (all Delta, `workspace.fire_pipeline.*`)
@@ -189,12 +189,12 @@ correlation time. MODIS and VIIRS 750m excluded.
 
 | Event | Date | score_display | Dist | FRP | Notes |
 |---|---|---|---|---|---|
-| Proletarsk oil depot (Rostov) | 2024-08-18 | **~55** | 5 km | 43.7 MW | Strongest true positive; summer, clear sky |
-| Dyagilevo airfield (Ryazan) | 2025-06-01 | ~3.3 | 6 km | 5.5 MW | Spiderweb campaign; confirmed fuel fire |
-| Lyudinovo oil terminal (Kaluga) | 2025-01-17 | ~3.2 | 1.3 km | 3.4 MW | Winter; weak but confirmed |
+| Proletarsk oil depot (Rostov) | 2024-08-18 | **72.5** | 4.4 km | 43.4 MW | Strong true positive; summer, clear sky |
+| Dyagilevo airfield (Ryazan) | 2025-06-01 | 3.2 | 6.1 km | 5.5 MW | Spiderweb campaign; confirmed fuel fire |
+| Lyudinovo oil terminal (Kaluga) | 2025-01-17 | 3.2 | 1.3 km | 3.4 MW | Winter; weak but confirmed |
 
 VIIRS cloud-cover misses (expected, not pipeline failures): Tuapse Jan 2024, Kazan Jan 2025,
-Kstovo Jan 2025.
+Kstovo Jan 2025, Kremenchuk refinery attacks.
 
 **`.env`** (see `.env.example` for full template)
 ```
@@ -210,4 +210,5 @@ DATABRICKS_SQL_HTTP_PATH=/sql/1.0/warehouses/...
 FP_CATALOG=workspace           # optional; defaults to "workspace"
 FP_SCHEMA=fire_pipeline        # optional; defaults to "fire_pipeline"
 AIRFLOW_CONN_DATABRICKS_DEFAULT={"conn_type":"databricks","host":"...","password":"..."}
+GH_TOKEN=github_pat
 ```

@@ -18,7 +18,7 @@ from pathlib import Path
 from databricks import sql
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 _HOST = os.environ["DATABRICKS_HOST"]
 _TOKEN = os.environ["DATABRICKS_TOKEN"]
@@ -27,7 +27,7 @@ _CATALOG = os.getenv("FP_CATALOG", "workspace")
 _SCHEMA = os.getenv("FP_SCHEMA", "fire_pipeline")
 _VIEW = f"{_CATALOG}.{_SCHEMA}.gold_fire_event_map"
 
-_OUT_DIR = Path(__file__).parent / "dashboard/data"
+_OUT_DIR = Path(__file__).resolve().parents[1] / "dashboard" / "data"
 
 
 def _connect():

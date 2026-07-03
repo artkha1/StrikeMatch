@@ -15,13 +15,14 @@ import os
 import tempfile
 import time
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 
 import pandas as pd
 import requests
 from databricks.sdk import WorkspaceClient
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 VOLUME_PATH = os.environ.get(
     "DATABRICKS_VOLUME_PATH", "/Volumes/workspace/fire_pipeline/bronze_inbound"

@@ -14,7 +14,7 @@ except Exception:
     sys.exit(0)  # fail open — don't block if we can't parse
 
 TRIGGER_SIGNALS = ["jobs.run_now", "run_now(job_id", "DATABRICKS_JOB_ID"]
-PIPELINE_SCRIPT = "spark_pipeline_databricks.py"
+PIPELINE_SCRIPT = "pipeline/spark_pipeline_databricks.py"
 
 if not any(s in cmd for s in TRIGGER_SIGNALS):
     sys.exit(0)
@@ -33,6 +33,6 @@ if has_changes:
     print(
         f"BLOCKED: {PIPELINE_SCRIPT} has local changes that haven't been uploaded "
         f"to the Databricks workspace.\n"
-        f"Upload the script to /Workspace/Users/timkhaiet@gmail.com/{PIPELINE_SCRIPT} first."
+        f"Upload the script to /Workspace/Users/timkhaiet@gmail.com/spark_pipeline_databricks.py first."
     )
     sys.exit(2)

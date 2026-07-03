@@ -16,13 +16,14 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 
 import pandas as pd
 import requests
 from databricks.sdk import WorkspaceClient
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 FIRMS_MAP_KEY: str = os.environ["FIRMS_MAP_KEY"]
 VOLUME_PATH = os.environ.get(

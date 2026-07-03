@@ -94,12 +94,12 @@ the Databricks job MERGEs bronze/gold. Schedule: daily at 06:00 UTC.
 
     ingest_firms = BashOperator(
         task_id="ingest_firms",
-        bash_command=f"cd {PIPELINE_DIR} && python firms_ingest.py",
+        bash_command=f"cd {PIPELINE_DIR} && python pipeline/firms_ingest.py",
     )
 
     ingest_acled = BashOperator(
         task_id="ingest_acled",
-        bash_command=f"cd {PIPELINE_DIR} && python acled_ingest.py",
+        bash_command=f"cd {PIPELINE_DIR} && python pipeline/acled_ingest.py",
     )
 
     # Trigger the deployed Databricks job (bronze→silver→gold Delta) over HTTPS.
@@ -117,7 +117,7 @@ the Databricks job MERGEs bronze/gold. Schedule: daily at 06:00 UTC.
     # Export gold view to dashboard/data/events.json + metadata.json for the static dashboard.
     export_data = BashOperator(
         task_id="export_data",
-        bash_command=f"cd {PIPELINE_DIR} && python export_data.py",
+        bash_command=f"cd {PIPELINE_DIR} && python pipeline/export_data.py",
     )
 
     # Commit and push updated JSON files so GitHub Pages picks them up.
