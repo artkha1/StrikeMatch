@@ -411,14 +411,15 @@ def build_serving_view() -> None:
             FROM best_matches
         )
         SELECT
-            firms_detection_id, fire_acq_datetime, fire_frp, fire_confidence, fire_lat, fire_lon,
-            acled_event_id, event_datetime, event_sub_event_type,
-            event_description, event_location_full_name, event_source, event_num_sources,
-            event_lat, event_lon, distance_m, time_delta_h, score,
-            score * 1000 AS score_display,
-            event_lat + CAST(_rank % 10 AS DOUBLE) * 0.001 - 0.0045 AS map_lat,
-            event_lon + CAST(_rank / 10 AS DOUBLE) * 0.001 - 0.0045 AS map_lon
-        FROM jittered
+            j.firms_detection_id, j.fire_acq_datetime, j.fire_frp, j.fire_confidence, j.fire_lat, j.fire_lon,
+            j.acled_event_id, a.global_event_id, j.event_datetime, j.event_sub_event_type,
+            j.event_description, j.event_location_full_name, j.event_source, j.event_num_sources,
+            j.event_lat, j.event_lon, j.distance_m, j.time_delta_h, j.score,
+            j.score * 1000 AS score_display,
+            j.event_lat + CAST(j._rank % 10 AS DOUBLE) * 0.001 - 0.0045 AS map_lat,
+            j.event_lon + CAST(j._rank / 10 AS DOUBLE) * 0.001 - 0.0045 AS map_lon
+        FROM jittered j
+        LEFT JOIN {T_ACLED_BRONZE} a ON j.acled_event_id = a.id
     """)
 
 

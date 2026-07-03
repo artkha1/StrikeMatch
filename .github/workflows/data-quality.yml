@@ -1,0 +1,23 @@
+name: Data Quality
+
+# Every dashboard data export (including the daily Airflow auto-commit) gets a
+# green/red data-quality check on the commit.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "dashboard/data/**"
+      - "pipeline/validate_export.py"
+  workflow_dispatch:
+
+jobs:
+  validate-export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      - run: python pipeline/validate_export.py

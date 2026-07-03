@@ -41,10 +41,10 @@ def _connect():
 def _fetch_events(cursor) -> list[dict]:
     cursor.execute(f"""
         SELECT
+            CAST(acled_event_id AS STRING)  AS acled_event_id,
+            global_event_id,
             map_lat,
             map_lon,
-            event_lat,
-            event_lon,
             CAST(score_display AS DOUBLE)   AS score_display,
             CAST(fire_frp AS DOUBLE)         AS fire_frp,
             fire_confidence,

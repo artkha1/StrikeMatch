@@ -83,7 +83,7 @@ Scope: Russia/Ukraine + Middle East theaters only.
 **Task graph**
 ```
 ingest_firms ─┐
-               ├──► run_databricks_job ──► validate_pipeline ──► export_data
+               ├──► run_databricks_job ──► validate_pipeline ──► export_data ──► validate_export ──► push_data
 ingest_acled ─┘
 ```
 
@@ -120,6 +120,13 @@ the Databricks job MERGEs bronze/gold. Schedule: daily at 06:00 UTC.
         bash_command=f"cd {PIPELINE_DIR} && python pipeline/export_data.py",
     )
 
+    # Data-quality gate on the exported JSON (uniqueness, bounds, theater bboxes,
+    # ground-truth benchmarks). Failing checks block the push to GitHub Pages.
+    validate_export = BashOperator(
+        task_id="validate_export",
+        bash_command=f"cd {PIPELINE_DIR} && python pipeline/validate_export.py",
+    )
+
     # Commit and push updated JSON files so GitHub Pages picks them up.
     # Requires GH_TOKEN in .env (a GitHub personal access token with contents:write).
     push_data = BashOperator(
@@ -140,4 +147,4 @@ the Databricks job MERGEs bronze/gold. Schedule: daily at 06:00 UTC.
         """,
     )
 
-    [ingest_firms, ingest_acled] >> run_databricks_job >> validate_pipeline >> export_data >> push_data
+    [ingest_firms, ingest_acled] >> run_databricks_job >> validate_pipeline >> export_data >> validate_export >> push_data
