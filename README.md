@@ -8,9 +8,7 @@
 [![Data Quality](https://github.com/artkha1/StrikeMatch/actions/workflows/data-quality.yml/badge.svg)](https://github.com/artkha1/StrikeMatch/actions/workflows/data-quality.yml)
 [![Deploy](https://github.com/artkha1/StrikeMatch/actions/workflows/pages.yml/badge.svg)](https://github.com/artkha1/StrikeMatch/actions/workflows/pages.yml)
 
-<!-- Capture a dashboard screenshot into docs/screenshot.png and uncomment:
 ![StrikeMatch dashboard](docs/screenshot.png)
--->
 
 ## How it works
 

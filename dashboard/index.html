@@ -830,7 +830,7 @@ backdrop.addEventListener('click', closeSidebar);
 // ────────────────────────────────────────────────────────────────
 // Map init
 // ────────────────────────────────────────────────────────────────
-const map = L.map('map', { center: [38, 38], zoom: 5, zoomControl: false });
+var map = L.map('map', { center: [38, 38], zoom: 5, zoomControl: false });
 
 L.control.zoom({ position: 'bottomleft' }).addTo(map);
 
