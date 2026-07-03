@@ -96,6 +96,18 @@ python pipeline/firms_ingest.py --start 2025-06-01 --end 2025-06-03   # Spiderwe
 python pipeline/acled_ingest.py --start 2024-08-18 --end 2024-08-18   # (repeat per event date)
 ```
 
+### Tests & data quality
+```bash
+pip install -r requirements-dev.txt
+ruff check .
+pytest -m "not spark"                 # pure-logic unit tests (fast)
+pytest -m spark                       # Spark transforms on a local session (needs Java; slow on Windows)
+python pipeline/validate_export.py    # GE gate + ground-truth checks on dashboard/data/
+```
+CI (`.github/workflows/ci.yml`) runs lint + both suites; `data-quality.yml` re-validates every
+`dashboard/data/**` push (including the daily Airflow auto-commit). Ground-truth benchmark events
+(see table below) are enforced by `validate_export.py` — a scoring change that loses them fails the gate.
+
 ### Databricks
 Drop Delta tables before a clean rebuild:
 ```sql
@@ -113,10 +125,10 @@ Trigger job: Databricks Workflows UI → `fire_event_pipeline` → Run now.
 - Task graph:
   ```
   ingest_firms ─┐
-                 ├──► run_databricks_job ──► validate_pipeline
+                 ├──► run_databricks_job ──► validate_pipeline ──► export_data ──► validate_export ──► push_data
   ingest_acled ─┘
   ```
-  `ingest_firms` and `ingest_acled` run in parallel (BashOperator). `run_databricks_job` uses `DatabricksRunNowOperator`. `validate_pipeline` queries bronze/silver/gold via Databricks SQL warehouse directly.
+  `ingest_firms` and `ingest_acled` run in parallel (BashOperator). `run_databricks_job` uses `DatabricksRunNowOperator`. `validate_pipeline` queries bronze/silver/gold via Databricks SQL warehouse directly. `export_data` writes the gold view to `dashboard/data/*.json` (columnar), `validate_export` runs the Great Expectations data-quality gate, `push_data` commits + pushes the JSON so GitHub Pages redeploys.
 
 ---
 
@@ -129,7 +141,10 @@ Trigger job: Databricks Workflows UI → `fire_event_pipeline` → Run now.
 | `pipeline/firms_ingest.py` | `fetch_source` — parallel fetch (one call per VIIRS product+region); `_in_conflict_zone` — spatial bbox filter; `parse_row` — field extraction + low-confidence drop; `_upload` — Parquet write to UC Volume |
 | `pipeline/acled_ingest.py` | `_get_token` — OAuth; `_fetch_page` — paginated API with retry; `_parse_row` — geo_precision + sub_event_type filter; `_upload` — Parquet write to UC Volume |
 | `pipeline/spark_pipeline_databricks.py` | `satellite_pass_dedup` — silver dedup (grid-bin + Haversine anti-join, 1 km/6 h); `compute_candidates` — 5-factor scoring spatial-temporal join; `merge_bronze`/`write_silver`/`write_gold`/`build_serving_view` — DDL + idempotent writes; `verify` — pipeline assertions |
+| `pipeline/export_data.py` | `_fetch_events` — gold view query; `_compact` — per-column rounding; `export` — columnar JSON (`{"columns", "rows"}`) → `dashboard/data/` |
+| `pipeline/validate_export.py` | Data-quality gate: GE suite (pandas fallback), theater bbox check, ground-truth benchmarks, metadata consistency; exit 1 blocks `push_data` |
 | `dags/fire_event_pipeline.py` | Airflow DAG — see task graph above |
+| `dashboard/index.html` | Static Leaflet dashboard (single file); fetches `./data/events.json` (columnar) + `metadata.json` |
 
 ### Tables (all Delta, `workspace.fire_pipeline.*`)
 
@@ -177,7 +192,9 @@ Many-to-many stored in gold; serving view selects best-scoring fire per ACLED ev
 `gold_fire_event_map` contains only confirmed correlations (score_display ≥ 2, one row per
 ACLED event). Fire-only and event-only rows are not surfaced. Map coordinates use ACLED
 event lat/lon with ROW_NUMBER-based jitter (10×10 grid at 0.001° steps, ±0.0045°) to
-separate co-located events (e.g., 40 events at the same Gaza coordinate).
+separate co-located events (e.g., 40 events at the same Gaza coordinate). The view joins
+bronze `acled_events` to expose `global_event_id`, and the export carries both event IDs
+so the data-quality gate can verify one-row-per-event.
 
 **FIRMS source & false-positive filter**
 VIIRS I-Band 375m only — NRT products (lag ~3 h) for recent dates, SP archive products
