@@ -2,17 +2,27 @@
 
 from datetime import datetime
 
-from pipeline.export_data import _build_metadata, _round
+from pipeline.export_data import _build_metadata, _compact
 
 
-def test_round_floats_to_five_digits():
-    assert _round(46.70281234567) == 46.70281
+def test_compact_rounds_coordinates_to_five_digits():
+    assert _compact("map_lat", 46.70281234567) == 46.70281
 
 
-def test_round_passes_through_non_floats():
-    assert _round("Proletarsk") == "Proletarsk"
-    assert _round(3) == 3
-    assert _round(None) is None
+def test_compact_rounds_display_values_to_one_digit():
+    assert _compact("score_display", 72.5123) == 72.5
+    assert _compact("fire_frp", 43.4567) == 43.5
+    assert _compact("time_delta_h", -10.0001) == -10.0
+
+
+def test_compact_rounds_distance_to_int():
+    assert _compact("distance_m", 4437.8) == 4438
+
+
+def test_compact_passes_through_non_floats():
+    assert _compact("event_location_full_name", "Proletarsk") == "Proletarsk"
+    assert _compact("event_num_sources", 3) == 3
+    assert _compact("event_description", None) is None
 
 
 def test_build_metadata_delta():

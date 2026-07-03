@@ -3,7 +3,12 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>StrikeMatch</title>
+  <title>StrikeMatch — satellite-confirmed strike events</title>
+  <meta name="description" content="StrikeMatch correlates NASA FIRMS satellite fire detections with ACLED-reported strikes across Russia/Ukraine and the Middle East." />
+  <meta property="og:title" content="StrikeMatch" />
+  <meta property="og:description" content="Satellite-confirmed strike events: NASA FIRMS fire detections correlated with ACLED combat reports, scored and mapped." />
+  <meta property="og:type" content="website" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Ccircle cx='12' cy='12' r='8' fill='none' stroke='%23c0392b' stroke-width='1.6'/%3E%3Cline x1='12' y1='1' x2='12' y2='4.5' stroke='%23c0392b' stroke-width='1.6' stroke-linecap='round'/%3E%3Cline x1='12' y1='19.5' x2='12' y2='23' stroke='%23c0392b' stroke-width='1.6' stroke-linecap='round'/%3E%3Cline x1='1' y1='12' x2='4.5' y2='12' stroke='%23c0392b' stroke-width='1.6' stroke-linecap='round'/%3E%3Cline x1='19.5' y1='12' x2='23' y2='12' stroke='%23c0392b' stroke-width='1.6' stroke-linecap='round'/%3E%3Cpath d='M12 7.3c1.8 1.9 3.1 3.4 3.1 5.2a3.1 3.1 0 1 1-6.2 0c0-1.8 1.3-3.3 3.1-5.2Z' fill='%23c0392b'/%3E%3C/svg%3E" />
 
   <!-- Leaflet -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
@@ -58,6 +63,12 @@
     }
 
     .header-icon { font-size: 20px; line-height: 1; }
+
+    .header-logo {
+      display: flex;
+      align-items: center;
+      flex-shrink: 0;
+    }
 
     .header-title {
       font-size: 15px;
@@ -241,6 +252,34 @@
     /* filters */
     .filter-group { display: flex; flex-direction: column; gap: 8px; }
 
+    /* theater quick-filters */
+    .theater-row {
+      display: grid;
+      grid-template-columns: auto 1fr 1fr;
+      gap: 5px;
+    }
+
+    .theater-btn {
+      font-family: 'Inter', sans-serif;
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--muted);
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      padding: 6px 9px;
+      cursor: pointer;
+      transition: border-color 0.12s, color 0.12s, background 0.12s;
+      white-space: nowrap;
+    }
+    .theater-btn:hover { border-color: #c5c2bb; color: var(--text); }
+    .theater-btn.active {
+      background: #fef2f2;
+      border-color: #fca5a5;
+      color: var(--accent);
+      font-weight: 600;
+    }
+
     .filter-check {
       display: flex;
       align-items: center;
@@ -415,6 +454,109 @@
 
     .chip.red { border-color: #fca5a5; color: var(--accent); background: #fef2f2; }
 
+    /* methodology */
+    details.methodology summary {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text);
+      cursor: pointer;
+      padding: 2px 0;
+    }
+    details.methodology summary:hover { color: var(--accent); }
+    details.methodology[open] summary { margin-bottom: 6px; }
+    .methodology-body {
+      font-size: 11px;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+    .methodology-body p { margin-bottom: 7px; }
+    .methodology-body .formula {
+      display: block;
+      font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+      font-size: 10px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 7px 9px;
+      margin: 7px 0;
+      color: var(--text);
+      overflow-x: auto;
+      white-space: nowrap;
+    }
+    .methodology-body a { color: var(--text); border-bottom: 1px solid var(--border); text-decoration: none; }
+
+    /* ── Loading overlay & error banner ─────────────────────── */
+    #loading-overlay {
+      position: fixed;
+      inset: 0;
+      background: var(--bg);
+      z-index: 2000;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: opacity 0.3s;
+    }
+    #loading-overlay.done { opacity: 0; pointer-events: none; }
+
+    .loading-box { width: min(320px, 80vw); text-align: center; }
+
+    .loading-mark { margin-bottom: 14px; }
+
+    .loading-title {
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 12px;
+    }
+
+    .loading-bar {
+      height: 6px;
+      background: var(--border);
+      border-radius: 3px;
+      overflow: hidden;
+    }
+
+    #loading-fill {
+      height: 100%;
+      width: 0%;
+      background: var(--accent);
+      border-radius: 3px;
+      transition: width 0.15s;
+    }
+
+    .loading-note {
+      font-size: 11px;
+      color: var(--muted);
+      margin-top: 10px;
+    }
+
+    #error-banner {
+      position: fixed;
+      top: calc(var(--header-h) + 12px);
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 2100;
+      background: #fef2f2;
+      border: 1px solid #fca5a5;
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 500;
+      padding: 10px 16px;
+      border-radius: 8px;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.10);
+      max-width: min(480px, 90vw);
+    }
+    #error-banner button {
+      font-family: 'Inter', sans-serif;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--accent);
+      background: none;
+      border: none;
+      cursor: pointer;
+      text-decoration: underline;
+      margin-left: 8px;
+    }
+
     /* bounce animation */
     @keyframes bounce {
       0%, 100% { transform: translateY(0); }
@@ -450,6 +592,16 @@
 
 <!-- ── Header ── -->
 <header>
+  <div class="header-logo" aria-hidden="true">
+    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <circle cx="12" cy="12" r="8" stroke="var(--accent)" stroke-width="1.6"/>
+      <line x1="12" y1="1" x2="12" y2="4.5" stroke="var(--accent)" stroke-width="1.6" stroke-linecap="round"/>
+      <line x1="12" y1="19.5" x2="12" y2="23" stroke="var(--accent)" stroke-width="1.6" stroke-linecap="round"/>
+      <line x1="1" y1="12" x2="4.5" y2="12" stroke="var(--accent)" stroke-width="1.6" stroke-linecap="round"/>
+      <line x1="19.5" y1="12" x2="23" y2="12" stroke="var(--accent)" stroke-width="1.6" stroke-linecap="round"/>
+      <path d="M12 7.3c1.8 1.9 3.1 3.4 3.1 5.2a3.1 3.1 0 1 1-6.2 0c0-1.8 1.3-3.3 3.1-5.2Z" fill="var(--accent)"/>
+    </svg>
+  </div>
   <div>
     <div class="header-title">StrikeMatch</div>
     <div class="header-sub" id="header-sub">NASA FIRMS satellite fire detections correlated with ACLED combat events &middot; Russia/Ukraine &amp; Middle East</div>
@@ -462,11 +614,11 @@
       <line x1="2" y1="12" x2="14" y2="12"/>
     </svg>
   </button>
-  <a class="header-link" href="https://github.com/artkha1" target="_blank" rel="noopener">
+  <a class="header-link" href="https://github.com/artkha1/StrikeMatch" target="_blank" rel="noopener">
     <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor">
       <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/>
     </svg>
-    artkha1
+    GitHub
   </a>
 </header>
 
@@ -506,6 +658,11 @@
       <div>
         <div class="section-label">Filters</div>
         <div class="filter-group">
+          <div class="theater-row">
+            <button class="theater-btn active" data-theater="all">All</button>
+            <button class="theater-btn" data-theater="uaru">Ukraine / Russia</button>
+            <button class="theater-btn" data-theater="me">Middle East</button>
+          </div>
           <div>
             <div class="date-row">
               <div>
@@ -558,13 +715,51 @@
       <!-- About -->
       <div>
         <div class="section-label">About</div>
-        <div style="font-size: 11px; color: var(--muted); line-height: 1.6;">
-          StrikeMatch correlates NASA FIRMS satellite fire detections with ACLED-reported
-          combat events near conflict infrastructure. Built by
+        <div style="font-size: 11px; color: var(--muted); line-height: 1.6; margin-bottom: 10px;">
+          StrikeMatch correlates
+          <a href="https://firms.modaps.eosdis.nasa.gov/" target="_blank" rel="noopener"
+             style="color: var(--text); text-decoration: none; border-bottom: 1px solid var(--border);">NASA FIRMS</a>
+          satellite fire detections with
+          <a href="https://acleddata.com/" target="_blank" rel="noopener"
+             style="color: var(--text); text-decoration: none; border-bottom: 1px solid var(--border);">ACLED</a>-reported
+          combat events near conflict infrastructure. Every point on this map is a reported strike
+          with an independent thermal signature seen from orbit. Built by
           <a href="https://github.com/artkha1" target="_blank" rel="noopener"
              style="color: var(--text); text-decoration: none; border-bottom: 1px solid var(--border);">artkha1</a>.
           Data coverage: Feb 2022 onwards, research-tier (~1-year lag).
         </div>
+
+        <details class="methodology">
+          <summary>How the score works</summary>
+          <div class="methodology-body">
+            <p>
+              A fire detection and a strike report are matched when they are within
+              <strong>10&nbsp;km</strong> of each other and the fire is observed within
+              <strong>48&nbsp;hours</strong> of the reported event date (+6&nbsp;h timezone buffer).
+              Each match is scored by multiplying five factors:
+            </p>
+            <span class="formula">score = frp/300 × conf × sources/3 × √(1−d/10km) × (1−|Δt|/54h) × 1000</span>
+            <p>
+              <strong>Fire intensity</strong> — radiative power relative to 300&nbsp;MW (an extreme fire) ·
+              <strong>Detection confidence</strong> — VIIRS high (1.0) vs nominal (0.8) ·
+              <strong>Source count</strong> — independent outlets reporting the event ·
+              <strong>Proximity</strong> — decays to 0 at the 10&nbsp;km boundary ·
+              <strong>Recency</strong> — decays linearly over the time window.
+            </p>
+            <p>
+              Scores above <strong>20</strong> are strong confirmations (large verified fires);
+              everything shown here clears the archival threshold of <strong>2</strong>.
+              Absence of a fire is not absence of a strike — VIIRS cannot see through clouds,
+              and small or brief fires can be missed between satellite passes.
+            </p>
+            <p>
+              Sensor: VIIRS I-Band 375&nbsp;m (Suomi-NPP + NOAA-20). Events: ACLED
+              air/drone strikes and shelling/artillery/missile attacks with site-precise
+              coordinates. Full methodology in the
+              <a href="https://github.com/artkha1/StrikeMatch#readme" target="_blank" rel="noopener">README</a>.
+            </p>
+          </div>
+        </details>
       </div>
 
     </div>
@@ -574,12 +769,41 @@
 <!-- Backdrop for mobile sidebar -->
 <div id="sidebar-backdrop"></div>
 
+<!-- Loading overlay -->
+<div id="loading-overlay">
+  <div class="loading-box">
+    <div class="loading-mark">
+      <svg width="36" height="36" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <circle cx="12" cy="12" r="8" stroke="var(--accent)" stroke-width="1.6"/>
+        <line x1="12" y1="1" x2="12" y2="4.5" stroke="var(--accent)" stroke-width="1.6" stroke-linecap="round"/>
+        <line x1="12" y1="19.5" x2="12" y2="23" stroke="var(--accent)" stroke-width="1.6" stroke-linecap="round"/>
+        <line x1="1" y1="12" x2="4.5" y2="12" stroke="var(--accent)" stroke-width="1.6" stroke-linecap="round"/>
+        <line x1="19.5" y1="12" x2="23" y2="12" stroke="var(--accent)" stroke-width="1.6" stroke-linecap="round"/>
+        <path d="M12 7.3c1.8 1.9 3.1 3.4 3.1 5.2a3.1 3.1 0 1 1-6.2 0c0-1.8 1.3-3.3 3.1-5.2Z" fill="var(--accent)"/>
+      </svg>
+    </div>
+    <div class="loading-title">Loading correlated events&hellip;</div>
+    <div class="loading-bar"><div id="loading-fill"></div></div>
+    <div class="loading-note" id="loading-note">Fetching dataset</div>
+  </div>
+</div>
+
+<!-- Error banner (hidden until a data fetch fails) -->
+<div id="error-banner" hidden></div>
+
 <script>
 // ────────────────────────────────────────────────────────────────
 // Config
 // ────────────────────────────────────────────────────────────────
 const DATA_URL     = './data/events.json';
 const METADATA_URL = './data/metadata.json';
+
+// Theater extents (lat_min, lat_max, lon_min, lon_max — union of the ingest
+// bboxes in pipeline/firms_ingest.py) and comfortable map views for each.
+const THEATERS = {
+  uaru: { extent: [41, 82, 19, 180], view: [[43.5, 21], [58, 46]] },
+  me:   { extent: [12, 43, 25, 64],  view: [[12, 25], [43, 64]] },
+};
 
 // ────────────────────────────────────────────────────────────────
 // Sidebar toggle (mobile)
@@ -619,6 +843,47 @@ L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
 // ────────────────────────────────────────────────────────────────
 // Helpers
 // ────────────────────────────────────────────────────────────────
+// ACLED text fields (descriptions, locations, sources) are injected into
+// popup/tooltip HTML — escape them so they render as text, never markup.
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, function(c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+  });
+}
+
+// events.json is columnar ({columns, rows}) to avoid repeating keys 24k times;
+// inflate to row objects once at boot. Legacy array-of-objects still accepted.
+function inflate(data) {
+  if (Array.isArray(data)) return data;
+  var cols = data.columns;
+  return data.rows.map(function(r) {
+    var o = {};
+    for (var i = 0; i < cols.length; i++) o[cols[i]] = r[i];
+    return o;
+  });
+}
+
+async function fetchJsonWithProgress(url, onProgress) {
+  var resp = await fetch(url);
+  if (!resp.ok) throw new Error('HTTP ' + resp.status + ' for ' + url);
+  var total = +resp.headers.get('Content-Length') || 0;
+  if (!resp.body || !total) return resp.json();
+
+  var reader = resp.body.getReader();
+  var chunks = [];
+  var received = 0;
+  for (;;) {
+    var step = await reader.read();
+    if (step.done) break;
+    chunks.push(step.value);
+    received += step.value.length;
+    // Content-Length is the compressed size while the reader yields decompressed
+    // bytes, so clamp — the bar is indicative, not exact.
+    onProgress(Math.min(1, received / total));
+  }
+  return JSON.parse(await new Blob(chunks).text());
+}
+
 function circleOptions(confidence, score) {
   const color  = confidence === 'h' ? '#c0392b' : '#d68910';
   const radius = Math.max(6, Math.min(6 + Math.sqrt(score || 2) * 1.8, 22));
@@ -628,21 +893,27 @@ function circleOptions(confidence, score) {
 function fmtScore(s) { return s != null ? s.toFixed(1) : '—'; }
 
 function popupHtml(e) {
-  const typeChip = '<span class="chip red">' + e.event_sub_event_type + '</span>';
+  const typeChip = '<span class="chip red">' + esc(e.event_sub_event_type) + '</span>';
   const confChip = '<span class="chip">' + (e.fire_confidence === 'h' ? 'High confidence' : 'Nominal') + '</span>';
   const frpChip  = '<span class="chip">FRP ' + e.fire_frp.toFixed(1) + ' MW</span>';
   const srcChip  = '<span class="chip">' + e.event_num_sources + ' source' + (e.event_num_sources > 1 ? 's' : '') + '</span>';
   const distChip = '<span class="chip">' + (e.distance_m / 1000).toFixed(1) + ' km apart</span>';
+  // time_delta_h = event midnight − fire time; negative means the fire was
+  // observed after the reported event date (the expected direction).
+  const dtChip = e.time_delta_h != null
+    ? '<span class="chip">fire seen ' + Math.abs(e.time_delta_h).toFixed(0) + ' h '
+      + (e.time_delta_h <= 0 ? 'after' : 'before') + ' event date</span>'
+    : '';
   const srcNames = (e.event_source || '').split(';').map(function(s) { return s.trim(); }).filter(Boolean).join(' · ');
   return '<div class="popup-inner">'
     + '<div class="popup-header">'
-    +   '<div class="popup-location">' + e.event_location_full_name + '</div>'
+    +   '<div class="popup-location">' + esc(e.event_location_full_name) + '</div>'
     +   '<div class="popup-score">' + fmtScore(e.score_display) + '</div>'
     + '</div>'
-    + '<div class="popup-meta">' + e._date + ' · ' + e.event_sub_event_type + '</div>'
-    + '<div class="popup-desc">' + (e.event_description || '') + '</div>'
-    + '<div class="popup-chips">' + typeChip + confChip + frpChip + srcChip + distChip + '</div>'
-    + (srcNames ? '<div style="font-size:10px;color:var(--muted);margin-top:8px">' + srcNames + '</div>' : '')
+    + '<div class="popup-meta">' + esc(e._date) + ' · ' + esc(e.event_sub_event_type) + '</div>'
+    + '<div class="popup-desc">' + esc(e.event_description) + '</div>'
+    + '<div class="popup-chips">' + typeChip + confChip + frpChip + srcChip + distChip + dtChip + '</div>'
+    + (srcNames ? '<div style="font-size:10px;color:var(--muted);margin-top:8px">' + esc(srcNames) + '</div>' : '')
     + '</div>';
 }
 
@@ -691,8 +962,31 @@ function passesFilter(e) {
   if (!chkShell.checked && e._typeLow.includes('shell'))      return false;
   if (dateFrom && e._date < dateFrom)                         return false;
   if (dateTo   && e._date > dateTo)                           return false;
+  if (activeTheater !== 'all') {
+    var ext = THEATERS[activeTheater].extent;
+    if (e.map_lat < ext[0] || e.map_lat > ext[1] ||
+        e.map_lon < ext[2] || e.map_lon > ext[3])             return false;
+  }
   return true;
 }
+
+// ── Theater quick-filters ───────────────────────────────────────
+var activeTheater = 'all';
+
+document.querySelectorAll('.theater-btn').forEach(function(btn) {
+  btn.addEventListener('click', function() {
+    activeTheater = btn.dataset.theater;
+    document.querySelectorAll('.theater-btn').forEach(function(b) {
+      b.classList.toggle('active', b === btn);
+    });
+    renderMarkers();
+    if (activeTheater !== 'all') {
+      map.flyToBounds(THEATERS[activeTheater].view, { duration: 1.0 });
+    } else {
+      map.flyTo([38, 38], 5, { duration: 1.0 });
+    }
+  });
+});
 
 function renderMarkers() {
   markerCluster.clearLayers();
@@ -711,18 +1005,20 @@ function renderMarkers() {
 // Leaderboard
 // ────────────────────────────────────────────────────────────────
 function buildLeaderboard(events) {
-  var top10 = events.slice().sort(function(a, b) { return b.score_display - a.score_display; }).slice(0, 10);
+  // The export is ORDER BY score_display DESC, so the top 10 are simply the
+  // first 10 rows — and each row's original index is its position.
+  var top10 = events.slice(0, 10);
   var lb = document.getElementById('leaderboard');
   lb.innerHTML = '';
 
   top10.forEach(function(e, i) {
-    var origIdx = allEvents.indexOf(e);
+    var origIdx = i;
     var row = document.createElement('div');
     row.className = 'lb-row';
     row.innerHTML = '<span class="lb-rank">' + (i + 1) + '</span>'
       + '<span class="lb-score">' + fmtScore(e.score_display) + '</span>'
-      + '<span class="lb-loc">'  + e.event_location_full_name + '</span>'
-      + '<span class="lb-date">' + e._date.slice(0, 7) + '</span>';
+      + '<span class="lb-loc">'  + esc(e.event_location_full_name) + '</span>'
+      + '<span class="lb-date">' + esc(e._date.slice(0, 7)) + '</span>';
 
     row.addEventListener('click', function() {
       document.querySelectorAll('.lb-row.active').forEach(function(r) { r.classList.remove('active'); });
@@ -804,13 +1100,29 @@ function loadStats(meta, events) {
 // ────────────────────────────────────────────────────────────────
 // Boot -- fetch, precompute, build markers once, then render
 // ────────────────────────────────────────────────────────────────
+var loadingOverlay = document.getElementById('loading-overlay');
+var loadingFill    = document.getElementById('loading-fill');
+var loadingNote    = document.getElementById('loading-note');
+var errorBanner    = document.getElementById('error-banner');
+
 async function boot() {
-  var results  = await Promise.all([fetch(DATA_URL), fetch(METADATA_URL)]);
-  allEvents    = await results[0].json();
-  var meta     = await results[1].json();
+  var results = await Promise.all([
+    fetchJsonWithProgress(DATA_URL, function(frac) {
+      loadingFill.style.width = (frac * 100).toFixed(0) + '%';
+    }),
+    fetch(METADATA_URL).then(function(r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status + ' for ' + METADATA_URL);
+      return r.json();
+    }),
+  ]);
+  allEvents = inflate(results[0]);
+  var meta  = results[1];
+
+  loadingFill.style.width = '100%';
+  loadingNote.textContent = 'Rendering ' + allEvents.length.toLocaleString() + ' events';
 
   // Stamp each event with precomputed filter fields, then create its marker.
-  // bindPopup receives a function so HTML is only built when the popup opens.
+  // bindPopup/bindTooltip receive functions so HTML is only built on demand.
   allMarkers = allEvents.map(function(e) {
     e._date    = (e.event_datetime || '').slice(0, 10);
     e._typeLow = (e.event_sub_event_type || '').toLowerCase();
@@ -819,7 +1131,10 @@ async function boot() {
     var marker = L.circleMarker([e.map_lat, e.map_lon], circleOptions(e.fire_confidence, e.score_display));
     marker.bindPopup(function() { return popupHtml(e); }, { maxWidth: 300, minWidth: 260 });
     marker.bindTooltip(
-      '<strong>' + e.event_location_full_name + '</strong><br>Score: ' + fmtScore(e.score_display) + ' · ' + e._date,
+      function() {
+        return '<strong>' + esc(e.event_location_full_name) + '</strong><br>Score: '
+          + fmtScore(e.score_display) + ' · ' + esc(e._date);
+      },
       { direction: 'right', offset: [10, 0] }
     );
     return marker;
@@ -829,9 +1144,25 @@ async function boot() {
   buildLeaderboard(allEvents);
   initDatePickers(allEvents);
   renderMarkers();
+
+  loadingOverlay.classList.add('done');
 }
 
-boot().catch(function(err) { console.error('Failed to load data:', err); });
+function showError(err) {
+  console.error('Failed to load data:', err);
+  loadingOverlay.classList.add('done');
+  errorBanner.innerHTML = 'Failed to load event data (' + esc(err.message) + ').'
+    + '<button id="retry-btn">Retry</button>';
+  errorBanner.hidden = false;
+  document.getElementById('retry-btn').addEventListener('click', function() {
+    errorBanner.hidden = true;
+    loadingOverlay.classList.remove('done');
+    loadingFill.style.width = '0%';
+    boot().catch(showError);
+  });
+}
+
+boot().catch(showError);
 </script>
 </body>
 </html>

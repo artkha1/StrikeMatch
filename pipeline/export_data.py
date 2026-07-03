@@ -2,7 +2,9 @@
 Export the gold_fire_event_map view to static JSON files for the frontend dashboard.
 
 Writes:
-  dashboard/data/events.json    — array of all correlated events (map markers + tooltip data)
+  dashboard/data/events.json    — correlated events in compact columnar form:
+                                  {"columns": [...], "rows": [[...], ...]}
+                                  (keys not repeated per row — roughly halves the payload)
   dashboard/data/metadata.json  — pipeline stats (last run, counts, delta)
 
 Run manually or as an Airflow task after validate_pipeline.
@@ -83,10 +85,16 @@ def _build_metadata(total: int, prev_total: int) -> dict:
     }
 
 
-def _round(val, digits=5):
-    if isinstance(val, float):
-        return round(val, digits)
-    return val
+def _compact(key: str, val):
+    """Round floats per column: metres to ints, display values to 1 decimal,
+    coordinates (and anything else) to 5 decimals."""
+    if not isinstance(val, float):
+        return val
+    if key == "distance_m":
+        return int(round(val))
+    if key in ("score_display", "fire_frp", "time_delta_h"):
+        return round(val, 1)
+    return round(val, 5)
 
 
 def export():
@@ -102,13 +110,16 @@ def export():
 
     print(f"Fetched {len(events)} events.")
 
-    clean = [
-        {k: _round(v) for k, v in row.items()}
-        for row in events
-    ]
+    columns = list(events[0].keys()) if events else []
+    payload = {
+        "columns": columns,
+        "rows": [[_compact(k, row[k]) for k in columns] for row in events],
+    }
 
     events_path = _OUT_DIR / "events.json"
-    events_path.write_text(json.dumps(clean, ensure_ascii=False), encoding="utf-8")
+    events_path.write_text(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8"
+    )
     print(f"Wrote {events_path} ({events_path.stat().st_size // 1024} KB)")
 
     meta = _build_metadata(len(events), prev_total)
