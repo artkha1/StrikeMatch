@@ -470,6 +470,13 @@
       line-height: 1.6;
     }
     .methodology-body p { margin-bottom: 7px; }
+    .methodology-body ul {
+      list-style: disc;
+      padding-left: 16px;
+      margin: 7px 0;
+    }
+    .methodology-body li { margin-bottom: 4px; }
+    .methodology-body li::marker { color: var(--muted); }
     .methodology-body .formula {
       display: block;
       font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
@@ -739,13 +746,13 @@
               Each match is scored by multiplying five factors:
             </p>
             <span class="formula">score = frp/300 × conf × sources/3 × √(1−d/10km) × (1−|Δt|/54h) × 1000</span>
-            <p>
-              <strong>Fire intensity</strong> — radiative power relative to 300&nbsp;MW (an extreme fire) ·
-              <strong>Detection confidence</strong> — VIIRS high (1.0) vs nominal (0.8) ·
-              <strong>Source count</strong> — independent outlets reporting the event ·
-              <strong>Proximity</strong> — decays to 0 at the 10&nbsp;km boundary ·
-              <strong>Recency</strong> — decays linearly over the time window.
-            </p>
+            <ul>
+              <li><strong>Fire intensity (FRP)</strong>: radiative power relative to 300&nbsp;MW (an extreme fire)</li>
+              <li><strong>Detection confidence</strong>: VIIRS high (1.0) vs nominal (0.8)</li>
+              <li><strong>Source count</strong>: independent outlets reporting the event</li>
+              <li><strong>Proximity</strong>: decays to 0 at the 10&nbsp;km boundary</li>
+              <li><strong>Recency</strong>: decays linearly over the time window.</li>
+            </ul>
             <p>
               Scores above <strong>20</strong> are strong confirmations (large verified fires);
               everything shown here clears the archival threshold of <strong>2</strong>.
@@ -900,10 +907,10 @@ function popupHtml(e) {
   const distChip = '<span class="chip">' + (e.distance_m / 1000).toFixed(1) + ' km apart</span>';
   // time_delta_h = event midnight − fire time; negative means the fire was
   // observed after the reported event date (the expected direction).
-  const dtChip = e.time_delta_h != null
-    ? '<span class="chip">fire seen ' + Math.abs(e.time_delta_h).toFixed(0) + ' h '
-      + (e.time_delta_h <= 0 ? 'after' : 'before') + ' event date</span>'
-    : '';
+  // const dtChip = e.time_delta_h != null
+  //   ? '<span class="chip">fire seen ' + Math.abs(e.time_delta_h).toFixed(0) + ' h '
+  //     + (e.time_delta_h <= 0 ? 'after' : 'before') + ' event date</span>'
+  //   : '';
   const srcNames = (e.event_source || '').split(';').map(function(s) { return s.trim(); }).filter(Boolean).join(' · ');
   return '<div class="popup-inner">'
     + '<div class="popup-header">'
@@ -912,7 +919,7 @@ function popupHtml(e) {
     + '</div>'
     + '<div class="popup-meta">' + esc(e._date) + ' · ' + esc(e.event_sub_event_type) + '</div>'
     + '<div class="popup-desc">' + esc(e.event_description) + '</div>'
-    + '<div class="popup-chips">' + typeChip + confChip + frpChip + srcChip + distChip + dtChip + '</div>'
+    + '<div class="popup-chips">' + typeChip + confChip + frpChip + srcChip + distChip + '</div>'
     + (srcNames ? '<div style="font-size:10px;color:var(--muted);margin-top:8px">' + esc(srcNames) + '</div>' : '')
     + '</div>';
 }
