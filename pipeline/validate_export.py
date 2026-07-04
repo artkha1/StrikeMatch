@@ -27,7 +27,8 @@ sys.path.insert(0, str(_ROOT))
 
 # firms_ingest requires FIRMS_MAP_KEY at import; validation only needs its bboxes.
 os.environ.setdefault("FIRMS_MAP_KEY", "unused-for-validation")
-from pipeline.firms_ingest import COUNTRY_BBOXES, STRIKE_SUBTYPES  # noqa: E402
+from pipeline.firms_ingest import COUNTRY_BBOXES  # noqa: E402
+from pipeline.acled_ingest import STRIKE_SUBTYPES  # noqa: E402
 
 EVENTS_PATH = _ROOT / "dashboard" / "data" / "events.json"
 METADATA_PATH = _ROOT / "dashboard" / "data" / "metadata.json"
@@ -102,7 +103,7 @@ def _column_checks_ge(df: pd.DataFrame, has_ids: bool) -> list[str]:
     for col, lo, hi in BOUNDS:
         suite.add_expectation(gxe.ExpectColumnValuesToBeBetween(column=col, min_value=lo, max_value=hi))
     suite.add_expectation(gxe.ExpectColumnValuesToBeInSet(column="fire_confidence", value_set=["h", "n"]))
-    suite.add_expectation(gxe.ExpectColumnValuesToBeInSet(column="event_sub_event_type", value_set=STRIKE_SUBTYPES))
+    suite.add_expectation(gxe.ExpectColumnValuesToBeInSet(column="event_sub_event_type", value_set=list(STRIKE_SUBTYPES)))
 
     results = batch.validate(suite)
 
@@ -133,7 +134,7 @@ def _column_checks_pandas(df: pd.DataFrame, has_ids: bool) -> list[str]:
         bad = ~df[col].between(lo if lo is not None else -float("inf"), hi if hi is not None else float("inf"))
         if bad.any():
             failures.append(f"between({col}, {lo}, {hi}): {int(bad.sum())} out-of-range values")
-    for col, allowed in (("fire_confidence", {"h", "n"}), ("event_sub_event_type", set(STRIKE_SUBTYPES))):
+    for col, allowed in (("fire_confidence", {"h", "n"}), ("event_sub_event_type", STRIKE_SUBTYPES)):
         bad = ~df[col].isin(allowed)
         if bad.any():
             failures.append(f"in_set({col}): {int(bad.sum())} unexpected values")
