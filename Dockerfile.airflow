@@ -12,7 +12,7 @@ RUN pip install --no-cache-dir \
     pyarrow \
     --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-2.9.2/constraints-3.11.txt"
 # great-expectations may not resolve under the Airflow constraint file; install
-# best-effort — pipeline/validate_export.py falls back to pandas checks without it.
+# best-effort - pipeline/validate_export.py falls back to pandas checks without it.
 RUN pip install --no-cache-dir great-expectations \
     --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-2.9.2/constraints-3.11.txt" \
-    || echo "great-expectations skipped (constraint conflict) — validate_export uses pandas fallback"
+    || echo "great-expectations skipped (constraint conflict) - validate_export uses pandas fallback"

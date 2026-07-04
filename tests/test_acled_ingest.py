@@ -29,17 +29,18 @@ def _raw_event(**overrides) -> dict:
 
 # ── column mapping (per the ACLED contract in CLAUDE.md) ────────────────────────
 
+
 def test_parse_row_maps_columns():
     t = _parse_row(_raw_event())
     assert t is not None
-    assert t[0] == "RUS12345"                      # global_event_id ← event_id_cnty
+    assert t[0] == "RUS12345"  # global_event_id = event_id_cnty
     assert t[2] == datetime(2024, 8, 18, tzinfo=timezone.utc)  # event_datetime @ 00:00 UTC
-    assert t[4] == "Air/drone strike"              # sub_event_type
-    assert t[5].startswith("On 18 August 2024")    # description ← notes
-    assert t[9] == "Proletarsk"                    # action_geo_fullname ← location
-    assert t[10] == "Russia"                       # action_geo_country
-    assert t[11] == 0                              # fatalities
-    assert (t[12], t[13]) == (46.7028, 41.7284)    # latitude/longitude
+    assert t[4] == "Air/drone strike"  # sub_event_type
+    assert t[5].startswith("On 18 August 2024")  # description = notes
+    assert t[9] == "Proletarsk"  # action_geo_fullname = location
+    assert t[10] == "Russia"  # action_geo_country
+    assert t[11] == 0  # fatalities
+    assert (t[12], t[13]) == (46.7028, 41.7284)  # latitude/longitude
 
 
 def test_parse_row_counts_semicolon_split_sources():
@@ -55,6 +56,7 @@ def test_parse_row_empty_source_counts_as_one():
 
 
 # ── filters ─────────────────────────────────────────────────────────────────────
+
 
 def test_parse_row_rejects_geo_precision_3():
     assert _parse_row(_raw_event(geo_precision="3")) is None
@@ -83,6 +85,7 @@ def test_parse_row_rejects_bad_coordinates():
 
 
 # ── _build_dataframe ────────────────────────────────────────────────────────────
+
 
 def test_build_dataframe_schema_and_stable_ids():
     rows = [_parse_row(_raw_event()), _parse_row(_raw_event(event_id_cnty="UKR99999"))]

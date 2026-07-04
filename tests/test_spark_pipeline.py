@@ -15,7 +15,7 @@ pyspark = pytest.importorskip("pyspark")
 
 from pyspark.sql import types as T  # noqa: E402
 
-pytestmark = pytest.mark.spark
+pytestmark = pytest.mark.spark  # marker so that "no spark" skips these tests
 
 T0 = datetime(2024, 8, 18, 10, 0, 0)
 
@@ -109,11 +109,14 @@ def _acled_row(id_, dt, lat, lon, num_sources=3):
 
 # ── haversine_col ───────────────────────────────────────────────────────────────
 
+
 def test_haversine_one_degree_latitude(spark, sp):
     from pyspark.sql import functions as F
 
     df = spark.createDataFrame([(0.0, 0.0, 1.0, 0.0)], "lat1 double, lon1 double, lat2 double, lon2 double")
-    dist = df.select(sp.haversine_col(F.col("lat1"), F.col("lon1"), F.col("lat2"), F.col("lon2")).alias("d")).first()["d"]
+    dist = df.select(sp.haversine_col(F.col("lat1"), F.col("lon1"), F.col("lat2"), F.col("lon2")).alias("d")).first()[
+        "d"
+    ]
     assert dist == pytest.approx(111_194.93, rel=1e-4)  # 2πR/360
 
 
@@ -121,11 +124,14 @@ def test_haversine_same_point_is_zero(spark, sp):
     from pyspark.sql import functions as F
 
     df = spark.createDataFrame([(46.7, 41.7, 46.7, 41.7)], "lat1 double, lon1 double, lat2 double, lon2 double")
-    dist = df.select(sp.haversine_col(F.col("lat1"), F.col("lon1"), F.col("lat2"), F.col("lon2")).alias("d")).first()["d"]
+    dist = df.select(sp.haversine_col(F.col("lat1"), F.col("lon1"), F.col("lat2"), F.col("lon2")).alias("d")).first()[
+        "d"
+    ]
     assert dist == pytest.approx(0.0, abs=1e-6)
 
 
 # ── confidence_filter ───────────────────────────────────────────────────────────
+
 
 def test_confidence_filter_drops_low(spark, sp):
     df = _firms_df(
@@ -143,16 +149,17 @@ def test_confidence_filter_drops_low(spark, sp):
 
 # ── satellite_pass_dedup ────────────────────────────────────────────────────────
 
+
 def test_dedup_transitive_chain_keeps_one(spark, sp):
     # A–B and B–C are each within 1 km / 6 h, but A–C is ~1.2 km apart.
     # Transitive dedup must collapse the whole chain to the highest id (C).
     df = _firms_df(
         spark,
         [
-            (1, T0, 50.0000, 30.0, 10.0, "h"),                          # A
-            (2, T0 + timedelta(hours=1), 50.0054, 30.0, 10.0, "h"),     # B, ~600 m from A
-            (3, T0 + timedelta(hours=2), 50.0108, 30.0, 10.0, "h"),     # C, ~600 m from B
-            (4, T0, 55.0, 40.0, 10.0, "h"),                             # D, far away
+            (1, T0, 50.0000, 30.0, 10.0, "h"),  # A
+            (2, T0 + timedelta(hours=1), 50.0054, 30.0, 10.0, "h"),  # B, ~600 m from A
+            (3, T0 + timedelta(hours=2), 50.0108, 30.0, 10.0, "h"),  # C, ~600 m from B
+            (4, T0, 55.0, 40.0, 10.0, "h"),  # D, far away
         ],
     ).select("id", "latitude", "longitude", "acq_datetime", "frp", "confidence")
     kept = {r["id"] for r in sp.satellite_pass_dedup(df).collect()}
@@ -160,7 +167,7 @@ def test_dedup_transitive_chain_keeps_one(spark, sp):
 
 
 def test_dedup_keeps_same_spot_outside_time_window(spark, sp):
-    # Same coordinates but 7 h apart — distinct thermal events, both kept.
+    # Same coordinates but 7 h apart - distinct thermal events, both kept.
     df = _firms_df(
         spark,
         [
@@ -173,6 +180,7 @@ def test_dedup_keeps_same_spot_outside_time_window(spark, sp):
 
 
 # ── compute_candidates ──────────────────────────────────────────────────────────
+
 
 def test_candidate_score_matches_formula(spark, sp):
     fire_lat, fire_lon = 46.70, 41.70
@@ -187,13 +195,13 @@ def test_candidate_score_matches_formula(spark, sp):
     row = rows[0]
 
     dist = haversine_ref(fire_lat, fire_lon, event_lat, event_lon)
-    delta_h = -10.0  # event midnight − fire time
+    delta_h = -10.0  # event midnight - fire time
     expected = (
-        min(43.4 / 300.0, 1.0)          # frp_score
-        * 1.0                            # conf_factor (high)
-        * min(3 / 3.0, 1.0)              # source_credibility
+        min(43.4 / 300.0, 1.0)  # frp_score
+        * 1.0  # conf_factor (high)
+        * min(3 / 3.0, 1.0)  # source_credibility
         * math.sqrt(1.0 - dist / 10_000.0)  # proximity_decay
-        * (1.0 - abs(delta_h) / 54.0)    # temporal_decay
+        * (1.0 - abs(delta_h) / 54.0)  # temporal_decay
     )
     assert row["distance_m"] == pytest.approx(dist, rel=1e-4)
     assert row["time_delta_h"] == pytest.approx(delta_h, abs=1e-6)
@@ -225,9 +233,15 @@ def test_candidate_excludes_beyond_10km(spark, sp):
 def test_candidate_temporal_window_edges(spark, sp):
     firms = _firms_df(spark, [(1, T0, 46.70, 41.70, 30.0, "h")])
 
-    inside_buffer = _acled_df(spark, [_acled_row(100, T0 + timedelta(hours=5), 46.70, 41.70)])
-    beyond_buffer = _acled_df(spark, [_acled_row(101, T0 + timedelta(hours=7), 46.70, 41.70)])
-    beyond_lookback = _acled_df(spark, [_acled_row(102, T0 - timedelta(hours=49), 46.70, 41.70)])
+    inside_buffer = _acled_df(
+        spark, [_acled_row(100, T0 + timedelta(hours=5), 46.70, 41.70)]
+    )  # event 5 hours after fire
+    beyond_buffer = _acled_df(
+        spark, [_acled_row(101, T0 + timedelta(hours=7), 46.70, 41.70)]
+    )  # event 7 hours after fire
+    beyond_lookback = _acled_df(
+        spark, [_acled_row(102, T0 - timedelta(hours=49), 46.70, 41.70)]
+    )  # event 49 hours before fire
 
     assert sp.compute_candidates(firms, inside_buffer).count() == 1
     assert sp.compute_candidates(firms, beyond_buffer).count() == 0

@@ -703,7 +703,7 @@
 
       <!-- Legend -->
       <div>
-        <div class="section-label">Confidence</div>
+        <div class="section-label">Fire Sensor Confidence</div>
         <div class="legend">
           <div class="legend-item">
             <div class="legend-dot" style="background:var(--accent); border: 1.5px solid white; box-shadow: 0 0 0 1px var(--accent);"></div>
@@ -885,7 +885,7 @@ async function fetchJsonWithProgress(url, onProgress) {
     chunks.push(step.value);
     received += step.value.length;
     // Content-Length is the compressed size while the reader yields decompressed
-    // bytes, so clamp — the bar is indicative, not exact.
+    // bytes, so clamp - the bar is indicative, not exact.
     onProgress(Math.min(1, received / total));
   }
   return JSON.parse(await new Blob(chunks).text());
@@ -893,12 +893,13 @@ async function fetchJsonWithProgress(url, onProgress) {
 
 function circleOptions(confidence, score) {
   const color  = confidence === 'h' ? '#c0392b' : '#d68910';
-  const radius = Math.max(6, Math.min(6 + Math.sqrt(score || 2) * 1.8, 22));
+  const radius = Math.max(6, Math.min(6 + Math.sqrt(score || 2) * 1.8, 22));  // radius between 6 and 22
   return { radius, fillColor: color, color: 'white', weight: 1.5, fillOpacity: 0.82 };
 }
 
 function fmtScore(s) { return s != null ? s.toFixed(1) : '—'; }
 
+// tooltip
 function popupHtml(e) {
   const typeChip = '<span class="chip red">' + esc(e.event_sub_event_type) + '</span>';
   const confChip = '<span class="chip">' + (e.fire_confidence === 'h' ? 'High confidence' : 'Nominal') + '</span>';
@@ -910,7 +911,7 @@ function popupHtml(e) {
   // const dtChip = e.time_delta_h != null
   //   ? '<span class="chip">fire seen ' + Math.abs(e.time_delta_h).toFixed(0) + ' h '
   //     + (e.time_delta_h <= 0 ? 'after' : 'before') + ' event date</span>'
-  //   : '';
+  //   : '';  // don't know exact strike time, misleading. Don't show this chip for now.
   const srcNames = (e.event_source || '').split(';').map(function(s) { return s.trim(); }).filter(Boolean).join(' · ');
   return '<div class="popup-inner">'
     + '<div class="popup-header">'
@@ -1013,7 +1014,7 @@ function renderMarkers() {
 // ────────────────────────────────────────────────────────────────
 function buildLeaderboard(events) {
   // The export is ORDER BY score_display DESC, so the top 10 are simply the
-  // first 10 rows — and each row's original index is its position.
+  // first 10 rows, and each row's original index is its position.
   var top10 = events.slice(0, 10);
   var lb = document.getElementById('leaderboard');
   lb.innerHTML = '';

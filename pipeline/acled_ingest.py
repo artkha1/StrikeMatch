@@ -10,6 +10,7 @@ Usage:
 Requires ACLED_USERNAME / ACLED_PASSWORD in .env (Research-tier OAuth credentials).
 Requires DATABRICKS_HOST, DATABRICKS_TOKEN, DATABRICKS_VOLUME_PATH in .env.
 """
+
 import argparse
 import os
 import tempfile
@@ -24,9 +25,7 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
-VOLUME_PATH = os.environ.get(
-    "DATABRICKS_VOLUME_PATH", "/Volumes/workspace/fire_pipeline/bronze_inbound"
-).rstrip("/")
+VOLUME_PATH = os.environ.get("DATABRICKS_VOLUME_PATH", "/Volumes/workspace/fire_pipeline/bronze_inbound").rstrip("/")
 
 LOOKBACK_DAYS = 1
 PAGE_SIZE = 5000
@@ -39,24 +38,35 @@ ACLED_TOKEN_URL = "https://acleddata.com/oauth/token"
 ACLED_READ_URL = "https://acleddata.com/api/acled/read"
 
 # ACLED sub_event_types to keep (Explosions/Remote violence family)
-STRIKE_SUBTYPES = {
-    "Air/drone strike",
-    "Shelling/artillery/missile attack"
-}
+STRIKE_SUBTYPES = {"Air/drone strike", "Shelling/artillery/missile attack"}
 
 # geo_precision 1 = exact coordinates, 2 = nearest admin center (<25 km typical)
 GEO_PRECISION_OK = {1, 2}
 
 # Countries in scope: Russia/Ukraine theater + Middle East theater
 ACLED_COUNTRIES = [
-    "Ukraine", "Russia",
-    "Israel", "Palestine", "Syria", "Iraq", "Yemen", "Lebanon",
-    "Iran", "Turkey", "Saudi Arabia", "Jordan", "Kuwait", "Bahrain",
-    "Qatar", "Oman", "United Arab Emirates",
+    "Ukraine",
+    "Russia",
+    "Israel",
+    "Palestine",
+    "Syria",
+    "Iraq",
+    "Yemen",
+    "Lebanon",
+    "Iran",
+    "Turkey",
+    "Saudi Arabia",
+    "Jordan",
+    "Kuwait",
+    "Bahrain",
+    "Qatar",
+    "Oman",
+    "United Arab Emirates",
 ]
 
 
 # -- Auth ----------------------------------------------------------------------
+
 
 def _get_token() -> str:
     resp = requests.post(
@@ -76,8 +86,10 @@ def _get_token() -> str:
 
 # -- Fetch ---------------------------------------------------------------------
 
-def _fetch_page(token: str, country: str, since: str, until: str, page: int,
-                retries: int = 3, backoff: int = 30) -> list[dict]:
+
+def _fetch_page(
+    token: str, country: str, since: str, until: str, page: int, retries: int = 3, backoff: int = 30
+) -> list[dict]:
     for attempt in range(1, retries + 1):
         try:
             resp = requests.get(
@@ -113,7 +125,7 @@ def _fetch_all(token: str, since: str, until: str) -> list[dict]:
             rows = _fetch_page(token, country, since, until, page)
             all_rows.extend(rows)
             country_total += len(rows)
-            if len(rows) < PAGE_SIZE:
+            if len(rows) < PAGE_SIZE:  # last page reached
                 break
             page += 1
         print(f"  {country}: {country_total:,}  (cumulative: {len(all_rows):,})", flush=True)
@@ -121,6 +133,7 @@ def _fetch_all(token: str, since: str, until: str) -> list[dict]:
 
 
 # -- Parse + filter -----------------------------------------------------------
+
 
 def _parse_row(r: dict) -> tuple | None:
     try:
@@ -144,40 +157,62 @@ def _parse_row(r: dict) -> tuple | None:
     num_sources = max(len(source_parts), 1)
 
     return (
-        str(r["event_id_cnty"]),                                           # [0]  global_event_id
-        ev_date,                                                            # [1]  event_date
-        ev_dt,                                                              # [2]  event_datetime
-        (r.get("event_type") or "").strip() or None,                       # [3]  event_type
-        sub_type or None,                                                   # [4]  sub_event_type
-        (r.get("notes") or "").strip() or None,                            # [5]  description
-        num_sources,                                                        # [6]  num_sources
-        (r.get("actor1") or "").strip() or None,                           # [7]  actor1_name
-        (r.get("actor2") or "").strip() or None,                           # [8]  actor2_name
-        (r.get("location") or "").strip() or None,                         # [9]  action_geo_fullname
-        (r.get("country") or "").strip() or None,                          # [10] action_geo_country
-        int(r["fatalities"]) if r.get("fatalities") is not None else None, # [11] fatalities
-        lat,                                                                # [12] latitude
-        lon,                                                                # [13] longitude
-        sources_raw or None,                                                # [14] source
+        str(r["event_id_cnty"]),  # [0]  global_event_id
+        ev_date,  # [1]  event_date
+        ev_dt,  # [2]  event_datetime
+        (r.get("event_type") or "").strip() or None,  # [3]  event_type
+        sub_type or None,  # [4]  sub_event_type
+        (r.get("notes") or "").strip() or None,  # [5]  description
+        num_sources,  # [6]  num_sources
+        (r.get("actor1") or "").strip() or None,  # [7]  actor1_name
+        (r.get("actor2") or "").strip() or None,  # [8]  actor2_name
+        (r.get("location") or "").strip() or None,  # [9]  action_geo_fullname
+        (r.get("country") or "").strip() or None,  # [10] action_geo_country
+        int(r["fatalities"]) if r.get("fatalities") is not None else None,  # [11] fatalities
+        lat,  # [12] latitude
+        lon,  # [13] longitude
+        sources_raw or None,  # [14] source
     )
 
 
 # -- DataFrame + upload -------------------------------------------------------
 
 _ACLED_COLS = [
-    "global_event_id", "event_date", "event_datetime",
-    "event_type", "sub_event_type", "description", "num_sources",
-    "actor1_name", "actor2_name",
-    "action_geo_fullname", "action_geo_country",
-    "fatalities", "latitude", "longitude", "source",
+    "global_event_id",
+    "event_date",
+    "event_datetime",
+    "event_type",
+    "sub_event_type",
+    "description",
+    "num_sources",
+    "actor1_name",
+    "actor2_name",
+    "action_geo_fullname",
+    "action_geo_country",
+    "fatalities",
+    "latitude",
+    "longitude",
+    "source",
 ]
 
 _DELTA_COL_ORDER = [
-    "id", "global_event_id", "event_date", "event_datetime",
-    "event_type", "sub_event_type", "description", "num_sources",
-    "actor1_name", "actor2_name",
-    "action_geo_fullname", "action_geo_country",
-    "fatalities", "latitude", "longitude", "source", "ingested_at",
+    "id",
+    "global_event_id",
+    "event_date",
+    "event_datetime",
+    "event_type",
+    "sub_event_type",
+    "description",
+    "num_sources",
+    "actor1_name",
+    "actor2_name",
+    "action_geo_fullname",
+    "action_geo_country",
+    "fatalities",
+    "latitude",
+    "longitude",
+    "source",
+    "ingested_at",
 ]
 
 
@@ -185,9 +220,7 @@ def _build_dataframe(rows: list[tuple]) -> pd.DataFrame:
     df = pd.DataFrame(rows, columns=_ACLED_COLS)
     # Stable hash ID from global_event_id — keeps correlations table references
     # consistent on re-runs (FIRMS also uses hash-based IDs for the same reason).
-    df["id"] = pd.util.hash_pandas_object(
-        df[["global_event_id"]], index=False
-    ).astype("int64")
+    df["id"] = pd.util.hash_pandas_object(df[["global_event_id"]], index=False).astype("int64")
     df["ingested_at"] = pd.Timestamp.now(tz="UTC")
     return df[_DELTA_COL_ORDER]
 
@@ -203,17 +236,20 @@ def _upload(df: pd.DataFrame, subdir: str) -> None:
             w.files.upload(target, fh, overwrite=True)
     finally:
         os.unlink(tmp_path)
-    print(f"  Uploaded → {target}  ({len(df):,} rows)")
+    print(f"  Uploaded -> {target}  ({len(df):,} rows)")
 
 
 # -- Main ----------------------------------------------------------------------
 
+
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Ingest ACLED strike events into Databricks UC Volume.")
-    p.add_argument("--start", type=date.fromisoformat, metavar="YYYY-MM-DD",
-                   help="Archive start date (inclusive). Requires --end.")
-    p.add_argument("--end",   type=date.fromisoformat, metavar="YYYY-MM-DD",
-                   help="Archive end date (inclusive). Requires --start.")
+    p.add_argument(
+        "--start", type=date.fromisoformat, metavar="YYYY-MM-DD", help="Archive start date (inclusive). Requires --end."
+    )
+    p.add_argument(
+        "--end", type=date.fromisoformat, metavar="YYYY-MM-DD", help="Archive end date (inclusive). Requires --start."
+    )
     args = p.parse_args()
     if bool(args.start) != bool(args.end):
         p.error("--start and --end must be used together")
@@ -228,7 +264,7 @@ def main() -> None:
         until = args.end.strftime("%Y-%m-%d")
         print(f"ACLED ingest: [archive] {since} to {until}")
     else:
-        effective_today = date.today() - timedelta(days=DATA_LAG_DAYS)
+        effective_today = date.today() - timedelta(days=DATA_LAG_DAYS)  # account for Research-tier lag
         since = (effective_today - timedelta(days=LOOKBACK_DAYS)).strftime("%Y-%m-%d")
         until = effective_today.strftime("%Y-%m-%d")
         print(
@@ -253,7 +289,7 @@ def main() -> None:
             parsed.append(t)
     print(
         f"After parse/filter: {len(parsed):,}  "
-        f"({skipped:,} skipped — bad coords, geo_precision=3, or non-strike sub_event_type)"
+        f"({skipped:,} skipped - bad coords, geo_precision=3, or non-strike sub_event_type)"
     )
 
     # Dedup within batch by global_event_id (ACLED can return the same event_id_cnty for

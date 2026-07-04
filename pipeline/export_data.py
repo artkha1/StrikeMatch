@@ -2,10 +2,10 @@
 Export the gold_fire_event_map view to static JSON files for the frontend dashboard.
 
 Writes:
-  dashboard/data/events.json    — correlated events in compact columnar form:
+  dashboard/data/events.json    - correlated events in compact columnar form:
                                   {"columns": [...], "rows": [[...], ...]}
-                                  (keys not repeated per row — roughly halves the payload)
-  dashboard/data/metadata.json  — pipeline stats (last run, counts, delta)
+                                  (keys not repeated per row, roughly halves the payload)
+  dashboard/data/metadata.json  - pipeline stats (last run, counts, delta)
 
 Run manually or as an Airflow task after validate_pipeline.
 Reads DATABRICKS_HOST, DATABRICKS_TOKEN, DATABRICKS_SQL_HTTP_PATH,
@@ -34,7 +34,7 @@ _OUT_DIR = Path(__file__).resolve().parents[1] / "dashboard" / "data"
 
 def _connect():
     return sql.connect(
-        server_hostname=_HOST.replace("https://", ""),
+        server_hostname=_HOST.replace("https://", "").rstrip("/"),
         http_path=_HTTP_PATH,
         access_token=_TOKEN,
     )
@@ -86,7 +86,7 @@ def _build_metadata(total: int, prev_total: int) -> dict:
 
 
 def _compact(key: str, val):
-    """Round floats per column: metres to ints, display values to 1 decimal,
+    """Round floats per column: meters to ints, display values to 1 decimal,
     coordinates (and anything else) to 5 decimals."""
     if not isinstance(val, float):
         return val
@@ -117,9 +117,7 @@ def export():
     }
 
     events_path = _OUT_DIR / "events.json"
-    events_path.write_text(
-        json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8"
-    )
+    events_path.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
     print(f"Wrote {events_path} ({events_path.stat().st_size // 1024} KB)")
 
     meta = _build_metadata(len(events), prev_total)

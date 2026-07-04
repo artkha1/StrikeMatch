@@ -1,7 +1,8 @@
-# Dev/test tooling — production deps live in requirements.txt
+# Dev/test tooling - production deps live in requirements.txt
 -r requirements.txt
 pytest>=8.0
 ruff>=0.4
 # GE supports Python <3.14; on newer interpreters validate_export.py uses its pandas fallback
 great-expectations>=1.3; python_version < "3.14"
 pyspark>=3.5
+    
