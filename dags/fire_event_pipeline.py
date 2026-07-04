@@ -144,7 +144,8 @@ the Databricks job MERGEs bronze/gold. Schedule: daily at 06:00 UTC.
                 echo "No data changes, skipping push"
             fi
         """,
-    )
+    )  # TODO: git push "$AUTH" HEAD:main has no branch guard.
+    # If the scheduler container has a feature branch checked out, it pushes that branch directly to main without a fast-forward check.
 
     (
         [ingest_firms, ingest_acled]

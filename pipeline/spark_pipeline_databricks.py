@@ -97,6 +97,7 @@ def _dominated_ids(df: DataFrame) -> DataFrame:
         .withColumn("time_bin", F.floor(F.col("acq_datetime").cast("long") / _6H_S).cast("long"))
     )  # binning is a coarse pre-filter to reduce the number of Haversine calculations
     # continuous coords -> bins
+    # Exp is needed to check adjacent bins (2 for lat, 5 for lon) to catch fires at boundaries (~1 km away)
 
     neighbor_offsets = F.array(
         *[
@@ -104,7 +105,7 @@ def _dominated_ids(df: DataFrame) -> DataFrame:
             for dlat in range(-_LAT_EXP, _LAT_EXP + 1)
             for dlon in range(-_LON_EXP, _LON_EXP + 1)
         ]
-    )  # offsets for the 5×5 grid of neighbouring bins (25 total) to join against
+    )  # offsets for the 11×5 grid of neighbouring bins (55 total) to join against
     b_expanded = (
         binned.withColumn("_off", F.explode(neighbor_offsets))
         .withColumn("join_lat", F.col("lat_bin") + F.col("_off.dlat"))
@@ -156,7 +157,7 @@ def satellite_pass_dedup(df: DataFrame) -> DataFrame:
 
 def compute_candidates(firms_silver: DataFrame, acled: DataFrame) -> DataFrame:
     """
-    Many-to-many spatial-temporal join: FIRMS × ACLED within 10 km and [-6 h, +48 h].
+    Many-to-many spatial-temporal join: FIRMS × ACLED within 10 km and [-48 h, +6 h].
     Score formula is the calibrated 5-factor multiplicative product (see CLAUDE.md and README.md).
     Denormalized fire/event coordinates are included so gold rows are self-contained.
     """
@@ -322,7 +323,9 @@ def merge_bronze(src: DataFrame, target: str, key: str) -> int:
         ON t.{key} = s.{key}
         WHEN NOT MATCHED THEN INSERT *
     """)
-    return spark.table(view).count()
+    return spark.table(
+        view
+    ).count()  # TODO: returns parquet row count, not number actually inserted into Delta (some may already exist). Could return Delta count before/after instead.
 
 
 def load_bronze() -> tuple[DataFrame, DataFrame]:

@@ -34,7 +34,7 @@ _OUT_DIR = Path(__file__).resolve().parents[1] / "dashboard" / "data"
 
 def _connect():
     return sql.connect(
-        server_hostname=_HOST.replace("https://", ""),
+        server_hostname=_HOST.replace("https://", "").rstrip("/"),
         http_path=_HTTP_PATH,
         access_token=_TOKEN,
     )

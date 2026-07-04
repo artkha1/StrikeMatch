@@ -83,8 +83,8 @@ python pipeline/acled_ingest.py          # fetch ACLED strikes, write Parquet â†
 
 Archive / backfill mode:
 ```bash
-python pipeline/firms_ingest.py --start 2022-02-01 --end 2022-02-28
-python pipeline/acled_ingest.py --start 2022-02-01 --end 2022-02-28
+python pipeline/firms_ingest.py --start 2022-02-24 --end 2022-02-28
+python pipeline/acled_ingest.py --start 2022-02-24 --end 2022-02-28
 # repeat month by month; then trigger Databricks job once. Start with February 24, 2022 to match Russian invasion of Ukraine
 ```
 
