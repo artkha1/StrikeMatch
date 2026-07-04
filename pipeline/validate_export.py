@@ -4,7 +4,7 @@ Data-quality gate for the exported dashboard dataset (dashboard/data/*.json).
 Runs a Great Expectations suite over events.json plus project-specific pandas
 checks (theater bounding boxes, ground-truth benchmark events, metadata
 consistency). Exits non-zero on any failure so the Airflow `validate_export`
-task blocks `push_data` — bad data never reaches GitHub Pages.
+task blocks `push_data` - bad data never reaches GitHub Pages.
 
 Runs in three places with the same checks:
   * Airflow task between export_data and push_data
@@ -34,15 +34,20 @@ METADATA_PATH = _ROOT / "dashboard" / "data" / "metadata.json"
 
 STRIKE_SUBTYPES = ["Air/drone strike", "Shelling/artillery/missile attack"]
 REQUIRED_NON_NULL = [
-    "map_lat", "map_lon", "score_display", "fire_frp", "fire_confidence",
-    "event_datetime", "event_location_full_name",
+    "map_lat",
+    "map_lon",
+    "score_display",
+    "fire_frp",
+    "fire_confidence",
+    "event_datetime",
+    "event_location_full_name",
 ]
-# (column, min, max) — match definition + serving thresholds from CLAUDE.md
+# (column, min, max) - match definition + serving thresholds from CLAUDE.md
 BOUNDS = [
-    ("score_display", 2.0, 1000.0),   # serving view keeps score_display >= 2 only
-    ("distance_m", 0.0, 10_000.0),    # 10 km proximity gate
-    ("time_delta_h", -48.0, 6.0),     # event_midnight in [fire - 48 h, fire + 6 h]
-    ("fire_frp", 1.0, None),          # sub-thermal fires excluded at join time
+    ("score_display", 2.0, 1000.0),  # serving view keeps score_display >= 2 only
+    ("distance_m", 0.0, 10_000.0),  # 10 km proximity gate
+    ("time_delta_h", -48.0, 6.0),  # event_midnight in [fire - 48 h, fire + 6 h]
+    ("fire_frp", 1.0, None),  # sub-thermal fires excluded at join time
 ]
 # Jitter spreads points up to ±0.0045°; allow a little slack past a country bbox edge.
 BBOX_TOLERANCE_DEG = 0.01
@@ -69,13 +74,16 @@ def load_events(path: Path = EVENTS_PATH) -> pd.DataFrame:
 
 # ── Column expectations (Great Expectations, pandas fallback) ───────────────────
 
+
 def _column_checks_ge(df: pd.DataFrame, has_ids: bool) -> list[str]:
     import great_expectations as gx
     import great_expectations.expectations as gxe
 
-    # The context must exist before the suite is built — in GE 1.x,
+    # The context must exist before the suite is built - in GE 1.x,
     # ExpectationSuite.add_expectation() requires an active project context.
-    context = gx.get_context(mode="ephemeral")
+    context = gx.get_context(
+        mode="ephemeral"
+    )  # TODO: change to file to generate test docs, properly set up to get full benefit of GE
     batch = (
         context.data_sources.add_pandas("events")
         .add_dataframe_asset("events")
@@ -85,8 +93,10 @@ def _column_checks_ge(df: pd.DataFrame, has_ids: bool) -> list[str]:
 
     suite = gx.ExpectationSuite(name="gold_export")
     if has_ids:
-        suite.add_expectation(gxe.ExpectColumnValuesToBeUnique(column="global_event_id"))
-        suite.add_expectation(gxe.ExpectColumnValuesToBeUnique(column="acled_event_id"))
+        suite.add_expectation(gxe.ExpectColumnValuesToBeUnique(column="global_event_id"))  # provided by ACLED
+        # TODO: not really a reason to do this, this just verifying ACLED isn't lying
+        # In a future release, the above check could be dropped anf global_event_id doesn't have to be exported altogether, remove the BRONZE joining in view serving in spark job
+        suite.add_expectation(gxe.ExpectColumnValuesToBeUnique(column="acled_event_id"))  # hashed global_event_id
         suite.add_expectation(gxe.ExpectColumnValuesToNotBeNull(column="global_event_id"))
     for col in REQUIRED_NON_NULL:
         suite.add_expectation(gxe.ExpectColumnValuesToNotBeNull(column=col))
@@ -103,6 +113,7 @@ def _column_checks_ge(df: pd.DataFrame, has_ids: bool) -> list[str]:
             cfg = r.expectation_config
             unexpected = r.result.get("unexpected_count", "?")
             failures.append(f"{cfg.type}({cfg.kwargs.get('column')}): {unexpected} unexpected values")
+            # Example: expect_column_values_to_be_in_set(fire_confidence): 1 unexpected values
     return failures
 
 
@@ -132,6 +143,7 @@ def _column_checks_pandas(df: pd.DataFrame, has_ids: bool) -> list[str]:
 
 # ── Project-specific checks (plain pandas) ──────────────────────────────────────
 
+
 def _check_theater_bboxes(df: pd.DataFrame) -> list[str]:
     """Every map point must fall inside at least one conflict-country bbox."""
     inside = pd.Series(False, index=df.index)
@@ -139,7 +151,9 @@ def _check_theater_bboxes(df: pd.DataFrame) -> list[str]:
     for mn_lat, mx_lat, mn_lon, mx_lon in COUNTRY_BBOXES.values():
         inside |= (
             df["map_lat"].between(mn_lat - t, mx_lat + t)
-            & df["map_lon"].between(mn_lon - t, mx_lon + t)
+            & df["map_lon"].between(
+                mn_lon - t, mx_lon + t
+            )  # at each iteration, rows corresponding to that bbox are marked True in `inside`
         )
     n_outside = int((~inside).sum())
     if n_outside:
@@ -174,6 +188,7 @@ def _check_metadata(df: pd.DataFrame, metadata_path: Path) -> list[str]:
 
 # ── Entry points ────────────────────────────────────────────────────────────────
 
+
 def run(events_path: Path = EVENTS_PATH, metadata_path: Path = METADATA_PATH) -> list[str]:
     """Run all checks; return a list of failure descriptions (empty = healthy)."""
     df = load_events(events_path)
@@ -181,7 +196,7 @@ def run(events_path: Path = EVENTS_PATH, metadata_path: Path = METADATA_PATH) ->
 
     has_ids = "global_event_id" in df.columns
     if not has_ids:
-        print("NOTE: ID columns not present yet (pre-dates the view change) — uniqueness checks skipped.")
+        print("NOTE: ID columns not present yet (pre-dates the view change), uniqueness checks skipped.")
 
     try:
         failures = _column_checks_ge(df, has_ids)
@@ -199,7 +214,7 @@ def run(events_path: Path = EVENTS_PATH, metadata_path: Path = METADATA_PATH) ->
 def main() -> None:
     failures = run()
     if failures:
-        print(f"\nFAILED — {len(failures)} check(s):")
+        print(f"\nFAILED - {len(failures)} check(s):")
         for f in failures:
             print(f"  - {f}")
         sys.exit(1)

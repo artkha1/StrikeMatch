@@ -11,7 +11,7 @@ from airflow.providers.databricks.operators.databricks import DatabricksRunNowOp
 PIPELINE_DIR = "/opt/pipeline"
 
 # Airflow connection id pointing at the Databricks workspace (host + PAT). Created
-# from DATABRICKS_HOST / DATABRICKS_TOKEN — see DATABRICKS.md.
+# from DATABRICKS_HOST / DATABRICKS_TOKEN
 DATABRICKS_CONN_ID = "databricks_default"
 DATABRICKS_JOB_ID = int(os.environ.get("DATABRICKS_JOB_ID", "0"))
 
@@ -19,7 +19,8 @@ default_args = {
     "owner": "pipeline",
     "retries": 1,
     "retry_delay": timedelta(minutes=5),
-    "email_on_failure": False,
+    "email_on_failure": True,
+    "email": [os.environ.get("ALERT_EMAIL")],
 }
 
 
@@ -34,21 +35,21 @@ def _validate_pipeline() -> None:
     schema = os.environ.get("FP_SCHEMA", "fire_pipeline")
     failures: list[str] = []
 
-    with sql.connect(
-        server_hostname=os.environ["DATABRICKS_HOST"].replace("https://", "").rstrip("/"),
-        http_path=os.environ["DATABRICKS_SQL_HTTP_PATH"],
-        access_token=os.environ["DATABRICKS_TOKEN"],
-    ) as conn, conn.cursor() as cur:
+    with (
+        sql.connect(
+            server_hostname=os.environ["DATABRICKS_HOST"].replace("https://", "").rstrip("/"),
+            http_path=os.environ["DATABRICKS_SQL_HTTP_PATH"],
+            access_token=os.environ["DATABRICKS_TOKEN"],
+        ) as conn,
+        conn.cursor() as cur,
+    ):
         for table in ("firms_detections", "acled_events", "firms_silver", "fire_event_correlations"):
             cur.execute(f"SELECT COUNT(*) FROM `{catalog}`.`{schema}`.`{table}`")
             n = cur.fetchone()[0]
             if n == 0:
                 failures.append(f"{table}: 0 rows")
 
-        cur.execute(
-            f"SELECT COUNT(*) FROM `{catalog}`.`{schema}`.fire_event_correlations"
-            " WHERE score < 0 OR score > 1"
-        )
+        cur.execute(f"SELECT COUNT(*) FROM `{catalog}`.`{schema}`.fire_event_correlations WHERE score < 0 OR score > 1")
         bad = cur.fetchone()[0]
         if bad:
             failures.append(f"fire_event_correlations: {bad} rows with score outside [0, 1]")
@@ -56,16 +57,14 @@ def _validate_pipeline() -> None:
     if failures:
         from airflow.exceptions import AirflowException
 
-        raise AirflowException(
-            "Validation failed:\n" + "\n".join(f"  - {f}" for f in failures)
-        )
+        raise AirflowException("Validation failed:\n" + "\n".join(f"  - {f}" for f in failures))
     print("All validation checks passed.")
 
 
 with DAG(
     dag_id="fire_event_pipeline",
     schedule="0 6 * * *",
-    start_date=datetime(2025, 1, 1),
+    start_date=datetime(2026, 6, 20),
     catchup=False,
     max_active_runs=1,
     default_args=default_args,
@@ -91,7 +90,6 @@ All tasks are **idempotent** — ingest scripts overwrite the Volume Parquet,
 the Databricks job MERGEs bronze/gold. Schedule: daily at 06:00 UTC.
     """,
 ) as dag:
-
     ingest_firms = BashOperator(
         task_id="ingest_firms",
         bash_command=f"cd {PIPELINE_DIR} && python pipeline/firms_ingest.py",
@@ -102,7 +100,7 @@ the Databricks job MERGEs bronze/gold. Schedule: daily at 06:00 UTC.
         bash_command=f"cd {PIPELINE_DIR} && python pipeline/acled_ingest.py",
     )
 
-    # Trigger the deployed Databricks job (bronze→silver→gold Delta) over HTTPS.
+    # Trigger the deployed Databricks job over HTTPS.
     run_databricks_job = DatabricksRunNowOperator(
         task_id="run_databricks_job",
         databricks_conn_id=DATABRICKS_CONN_ID,
@@ -147,4 +145,11 @@ the Databricks job MERGEs bronze/gold. Schedule: daily at 06:00 UTC.
         """,
     )
 
-    [ingest_firms, ingest_acled] >> run_databricks_job >> validate_pipeline >> export_data >> validate_export >> push_data
+    (
+        [ingest_firms, ingest_acled]
+        >> run_databricks_job
+        >> validate_pipeline
+        >> export_data
+        >> validate_export
+        >> push_data
+    )

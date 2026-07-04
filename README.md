@@ -1,4 +1,4 @@
-# StrikeMatch 🛰️🔥
+# StrikeMatch
 
 **Satellite-confirmed strike events.** StrikeMatch correlates [NASA FIRMS](https://firms.modaps.eosdis.nasa.gov/) satellite fire/thermal-anomaly detections with [ACLED](https://acleddata.com/)-reported combat events across two theaters — **Russia/Ukraine** and the **Middle East** — and serves the confirmed matches on an interactive map. Every point is a reported strike with an independent thermal signature seen from orbit.
 
@@ -13,20 +13,28 @@
 ## How it works
 
 ```mermaid
-flowchart LR
-    FIRMS["NASA FIRMS API<br/>(VIIRS 375 m)"] --> IF["firms_ingest.py"]
-    ACLED["ACLED API<br/>(OAuth, strike events)"] --> IA["acled_ingest.py"]
-    IF --> VOL["Parquet on UC Volume"]
-    IA --> VOL
-    VOL --> JOB["Databricks Spark job<br/>bronze → silver → gold"]
-    JOB --> VIEW["gold_fire_event_map<br/>(serving view)"]
-    VIEW --> PBI["Power BI"]
-    VIEW --> EXP["export_data.py"]
-    EXP --> DQ["validate_export.py<br/>(Great Expectations gate)"]
-    DQ --> PAGES["GitHub Pages<br/>Leaflet dashboard"]
-    AF["Airflow (Docker)<br/>daily 06:00 UTC"] -.orchestrates.-> IF
+flowchart TB
+    AF["Airflow (Docker)<br/>daily 06:00 UTC"]
+
+    subgraph pipeline[" "]
+        direction LR
+        FIRMS["NASA FIRMS API<br/>(VIIRS 375 m)"] --> IF["firms_ingest.py"]
+        ACLED["ACLED API<br/>(Strike Events)"] --> IA["acled_ingest.py"]
+        IF --> VOL["Parquet on UC Volume"]
+        IA --> VOL
+        VOL --> JOB["Databricks Spark job<br/>bronze → silver → gold"]
+        JOB --> VIEW["gold_fire_event_map<br/>(serving view)"]
+        VIEW --> PBI["Power BI"]
+        VIEW --> EXP["export_data.py"]
+        EXP --> DQ["validate_export.py<br/>(Great Expectations gate)"]
+        DQ --> PAGES["GitHub Pages<br/>Leaflet dashboard"]
+    end
+
+    AF -. orchestrates .-> IF
     AF -.-> IA
     AF -.-> JOB
+    AF -.-> EXP
+    AF -.-> DQ
 ```
 
 1. **Ingest** — `pipeline/firms_ingest.py` pulls VIIRS I-Band 375 m detections (NRT for recent dates, SP archive otherwise) for the two theaters; `pipeline/acled_ingest.py` pulls ACLED *Air/drone strike* and *Shelling/artillery/missile attack* events with site-precise coordinates (`geo_precision` 1–2). Both write Parquet straight to a Databricks Unity Catalog Volume.
@@ -47,7 +55,7 @@ score = (frp/300) × conf × (sources/3) × √(1 − d/10 km) × (1 − |Δt|/5
 | `conf` | 1.0 high / 0.8 nominal | VIIRS detection confidence |
 | `sources/3` (cap 1) | independent outlets reporting | conflict reporting is 1–4 outlets |
 | `√(1 − d/10 km)` | proximity decay | concave; 0 at the 10 km boundary |
-| `1 − |Δt|/54 h` | temporal decay | linear over the match window |
+| `1 − \|Δt\|/54 h` | temporal decay | linear over the match window |
 
 Displayed scores ≥ **20** are strong confirmations; the archival threshold is **2**.
 
@@ -110,13 +118,20 @@ python pipeline/validate_export.py   # GE suite + ground-truth checks on the exp
 
 CI runs lint + both test suites on every push; a separate workflow re-validates the data on every dashboard export commit.
 
-## Honest limitations
+## Limitations
 
 - **ACLED lag** — Research-tier access publishes with a ~1-year delay, so the map trails real-time by about a year.
-- **Clouds** — VIIRS cannot see through cloud cover; several documented strikes (Tuapse Jan 2024, Kazan Jan 2025, Kstovo Jan 2025, Kremenchuk) have no thermal match. Absence of a fire is not absence of a strike.
+- **Clouds** — VIIRS cannot see through cloud cover; several documented strikes (Tuapse Jan 2024, Kazan Jan 2025, Kstovo Jan 2025, Kremenchuk oil refinery strikes) have no thermal match. Absence of a fire is not absence of a strike.
 - **Geolocation** — ACLED `geo_precision` 2 places events at the nearest admin center; the 10 km gate absorbs most but not all of that error.
 - **Small fires** — detections under 1 MW FRP are treated as sub-thermal noise and excluded.
 
 ## Stack
 
-Python · pandas · PySpark on Databricks serverless (Delta Lake medallion, Unity Catalog) · Apache Airflow 2.9 (Docker Compose) · Great Expectations · pytest + ruff + GitHub Actions · Leaflet + MarkerCluster on GitHub Pages · Power BI over a Databricks SQL warehouse
+- Python
+- pandas
+- PySpark on Databricks serverless (Delta Lake medallion, Unity Catalog)
+- Apache Airflow 2.9 (Docker Compose)
+- Great Expectations
+- pytest + ruff + GitHub Actions
+- Leaflet + MarkerCluster on GitHub Pages
+- Power BI over a Databricks SQL warehouse

@@ -1,24 +1,12 @@
 #!/usr/bin/env python3
 """
-Phase 4 (Databricks Free Edition): PySpark bronze->silver->gold on Delta tables.
-
-This is the Databricks-serverless port of spark_pipeline.py. It runs as a Databricks
-Job task (or notebook). The spatial/temporal transform is identical — the same native
-Spark-column Haversine logic — but all Postgres/PostGIS I/O is replaced with Delta:
+Databricks Free Edition: PySpark bronze->silver->gold on Delta tables.
 
   bronze   workspace.fire_pipeline.firms_detections   (loaded from Parquet on a UC Volume)
            workspace.fire_pipeline.acled_events        (loaded from Parquet on a UC Volume)
   silver   workspace.fire_pipeline.firms_silver        (overwritten each run)
   gold     workspace.fire_pipeline.fire_event_correlations (MERGE upsert)
            workspace.fire_pipeline.gold_fire_event_map (serving view for Power BI)
-
-Why this differs from spark_pipeline.py (and why it is serverless-safe):
-  * No SparkSession.builder.config(...) — serverless provides `spark` and rejects
-    cluster config (driver memory, jars.packages, shuffle.partitions, master).
-  * No psycopg2 / PostGIS / GEOGRAPHY. Power BI maps from plain lat/lon, so geom is
-    dropped. Delta MERGE replaces the staging-table + ON CONFLICT dance.
-  * No JDBC read of local Postgres — Databricks cannot reach it. Bronze arrives as
-    Parquet on a Unity Catalog Volume, pushed up by the ingest scripts.
 
 Config via environment / Databricks job parameters (all have defaults):
   FP_CATALOG        default "workspace"
@@ -33,16 +21,14 @@ from pyspark.sql import functions as F
 from pyspark.sql.types import FloatType
 
 # On Databricks `spark` is pre-provisioned in the notebook/job globals. When this file
-# is run as a job task we fetch the active session — serverless returns it without any
-# cluster config, which is exactly what we want.
+# is run as a job task we fetch the active session, serverless returns it without any
+# cluster config
 spark = SparkSession.builder.getOrCreate()
 
 # ── Identifiers ─────────────────────────────────────────────────────────────────
 CATALOG = os.environ.get("FP_CATALOG", "workspace")
 SCHEMA = os.environ.get("FP_SCHEMA", "fire_pipeline")
-VOLUME_INBOUND = os.environ.get(
-    "FP_VOLUME_INBOUND", f"/Volumes/{CATALOG}/{SCHEMA}/bronze_inbound"
-)
+VOLUME_INBOUND = os.environ.get("FP_VOLUME_INBOUND", f"/Volumes/{CATALOG}/{SCHEMA}/bronze_inbound")
 
 _NS = f"`{CATALOG}`.`{SCHEMA}`"
 T_FIRMS_BRONZE = f"{_NS}.firms_detections"
@@ -56,40 +42,40 @@ P_FIRMS = f"{VOLUME_INBOUND}/firms_detections"
 P_ACLED = f"{VOLUME_INBOUND}/acled_events"
 
 # No LOOKBACK_DAYS or DATA_LAG_DAYS here. The Databricks job processes exactly what
-# export_bronze.py uploaded to the Volume — date scoping is done there (rolling window
+# export_bronze.py uploaded to the Volume, date scoping is done there (rolling window
 # or --all for archive runs). Reading back from Delta with a time filter would anchor
 # on the Delta table's max timestamp and silently exclude archive data.
 
-# Dedup constants (identical to spark_pipeline.py)
-_6H_S = 21_600     # 6 hours in seconds
-_1KM_M = 1_006.0   # 1 km + 0.6% for Haversine/WGS-84 meridional-radius divergence
+# Dedup constants
+_6H_S = 21_600  # 6 hours in seconds
+_1KM_M = 1_006.0  # 1 km + 0.6% for Haversine/WGS-84 meridional-radius divergence
 
-# Join constants (identical to spark_pipeline.py)
-_10KM_M    = 10_000.0    # proximity gate AND scoring denominator (replaces _25KM_M)
-_MIN_FRP_MW = 1.0        # minimum FRP (MW) for correlation — filters sub-thermal noise at join time
-_48H_S     = 48 * 3600   # fire must be observed within 48 h of event midnight (same/next day)
-_6H_BUFFER = 6 * 3600    # small timezone buffer (ACLED event_date is local; FIRMS is UTC)
-_SCORE_H   = 54.0        # temporal-decay denominator = 48 + 6
+# Join constants
+_10KM_M = 10_000.0  # proximity gate AND scoring denominator
+_MIN_FRP_MW = 1.0  # minimum FRP (MW) for correlation, filters sub-thermal noise at join time
+_48H_S = 48 * 3600  # fire must be observed within 48 h of event midnight (same/next day)
+_6H_BUFFER = (
+    6 * 3600
+)  # small timezone buffer (ACLED event_date is local; FIRMS is UTC. A strike at 1am local time in Ukraine is still the same day as a fire at 11pm UTC)
+_SCORE_H = 54.0  # temporal-decay denominator = 48 + 6
 
 
-# ── Haversine (native Spark columns — no Python UDF subprocess) ────────────────
-# Verbatim from spark_pipeline.py — runs entirely in the JVM, serverless-safe.
+# ── Haversine (native Spark columns, no Python UDF subprocess) ────────────────
+
 
 def haversine_col(lat1, lon1, lat2, lon2):
     """Spherical great-circle distance in metres as a native Spark Column."""
-    R = 6_371_000.0
+    R = 6_371_000.0  # Earth radius in metres
     phi1 = F.radians(lat1)
     phi2 = F.radians(lat2)
     dphi = F.radians(lat2 - lat1)
     dlam = F.radians(lon2 - lon1)
-    a = (
-        F.pow(F.sin(dphi / 2.0), 2)
-        + F.cos(phi1) * F.cos(phi2) * F.pow(F.sin(dlam / 2.0), 2)
-    )
+    a = F.pow(F.sin(dphi / 2.0), 2) + F.cos(phi1) * F.cos(phi2) * F.pow(F.sin(dlam / 2.0), 2)
     return F.lit(2.0 * R) * F.asin(F.sqrt(F.least(a, F.lit(1.0))))
 
 
-# ── Silver transform (verbatim logic from spark_pipeline.py) ────────────────────
+# ── Silver transform ────────────────────
+
 
 def confidence_filter(df: DataFrame) -> DataFrame:
     """Drop low-confidence FIRMS rows (mirrors the filter in firms_ingest.py)."""
@@ -99,50 +85,50 @@ def confidence_filter(df: DataFrame) -> DataFrame:
 def _dominated_ids(df: DataFrame) -> DataFrame:
     """
     Grid-bin explode + equi-join + exact Haversine: return the ids that are
-    'dominated' (within 1 km AND 6 h of a lower-id detection). Shared by
+    'dominated' (within 1 km AND 6 h of a higher-id detection). Shared by
     satellite_pass_dedup and the post-run verification check.
     """
     _CELL_DEG = 0.009  # ≈1 km in latitude
-    _LON_EXP = 5       # lon neighbour radius; covers fires to ~76°N
-    _LAT_EXP = 2       # lat neighbour radius
+    _LON_EXP = 5  # lon neighbour radius; covers fires to ~76°N
+    _LAT_EXP = 2  # lat neighbour radius
     binned = (
-        df
-        .withColumn("lat_bin", F.floor(F.col("latitude") / _CELL_DEG).cast("long"))
+        df.withColumn("lat_bin", F.floor(F.col("latitude") / _CELL_DEG).cast("long"))
         .withColumn("lon_bin", F.floor(F.col("longitude") / _CELL_DEG).cast("long"))
         .withColumn("time_bin", F.floor(F.col("acq_datetime").cast("long") / _6H_S).cast("long"))
-    )
+    )  # binning is a coarse pre-filter to reduce the number of Haversine calculations
+    # continuous coords -> bins
 
-    neighbor_offsets = F.array(*[
-        F.struct(F.lit(dlat).alias("dlat"), F.lit(dlon).alias("dlon"))
-        for dlat in range(-_LAT_EXP, _LAT_EXP + 1)
-        for dlon in range(-_LON_EXP, _LON_EXP + 1)
-    ])
+    neighbor_offsets = F.array(
+        *[
+            F.struct(F.lit(dlat).alias("dlat"), F.lit(dlon).alias("dlon"))
+            for dlat in range(-_LAT_EXP, _LAT_EXP + 1)
+            for dlon in range(-_LON_EXP, _LON_EXP + 1)
+        ]
+    )  # offsets for the 5×5 grid of neighbouring bins (25 total) to join against
     b_expanded = (
-        binned
-        .withColumn("_off", F.explode(neighbor_offsets))
+        binned.withColumn("_off", F.explode(neighbor_offsets))
         .withColumn("join_lat", F.col("lat_bin") + F.col("_off.dlat"))
         .withColumn("join_lon", F.col("lon_bin") + F.col("_off.dlon"))
         .drop("_off")
-    )
+    )  # expanded bins to include neighbours
+    # expands one row per neighbor, one fire becomes ~220 rows, each pointing to a neighboring cell.
 
-    candidate_pairs = (
-        binned.alias("a")
-        .join(
-            b_expanded.alias("b"),
-            (F.col("a.lat_bin") == F.col("b.join_lat")) &
-            (F.col("a.lon_bin") == F.col("b.join_lon")) &
-            (F.col("a.id") < F.col("b.id")) &
-            (F.abs(F.col("a.time_bin") - F.col("b.time_bin")) <= 1),
-        )
+    candidate_pairs = binned.alias("a").join(
+        b_expanded.alias("b"),
+        (F.col("a.lat_bin") == F.col("b.join_lat"))
+        & (F.col("a.lon_bin") == F.col("b.join_lon"))
+        & (F.col("a.id") < F.col("b.id"))
+        & (F.abs(F.col("a.time_bin") - F.col("b.time_bin")) <= 1),
     )
 
     return (
-        candidate_pairs
-        .withColumn(
+        candidate_pairs.withColumn(
             "dist_m",
             haversine_col(
-                F.col("a.latitude"), F.col("a.longitude"),
-                F.col("b.latitude"), F.col("b.longitude"),
+                F.col("a.latitude"),
+                F.col("a.longitude"),
+                F.col("b.latitude"),
+                F.col("b.longitude"),
             ),
         )
         .withColumn(
@@ -150,7 +136,9 @@ def _dominated_ids(df: DataFrame) -> DataFrame:
             F.abs(F.col("a.acq_datetime").cast("long") - F.col("b.acq_datetime").cast("long")),
         )
         .filter((F.col("dist_m") <= _1KM_M) & (F.col("time_diff_s") <= _6H_S))
-        .select(F.col("a.id").alias("id"))   # drop the older (lower-id) row, keep latest
+        .select(F.col("a.id").alias("id"))  # drop the lower-id row, keep latest
+        # id order doesn't matter since they are random hashes
+        # TODO: keep fire with highest confidence, or FRP
         .distinct()
     )
 
@@ -158,18 +146,18 @@ def _dominated_ids(df: DataFrame) -> DataFrame:
 def satellite_pass_dedup(df: DataFrame) -> DataFrame:
     """
     Remove near-duplicate detections so no two output rows are within 1 km AND 6 h.
-    Grid-bin explode + equi-join + Haversine + anti-join (see spark_pipeline.py for
-    the full derivation of the bin-expansion radii).
+    Grid-bin explode + equi-join + Haversine + anti-join.
     """
     return df.join(_dominated_ids(df), on="id", how="left_anti")
 
 
 # ── FIRMS × ACLED candidate join ───────────────────────────────────────────────
 
+
 def compute_candidates(firms_silver: DataFrame, acled: DataFrame) -> DataFrame:
     """
-    Many-to-many spatial-temporal join: FIRMS × ACLED within 25 km and [-72 h, +12 h].
-    Score formula is the calibrated 5-factor multiplicative product (see CLAUDE.md).
+    Many-to-many spatial-temporal join: FIRMS × ACLED within 10 km and [-6 h, +48 h].
+    Score formula is the calibrated 5-factor multiplicative product (see CLAUDE.md and README.md).
     Denormalized fire/event coordinates are included so gold rows are self-contained.
     """
     f = firms_silver.select(
@@ -181,11 +169,11 @@ def compute_candidates(firms_silver: DataFrame, acled: DataFrame) -> DataFrame:
         F.col("confidence"),
     ).filter(F.col("frp") >= F.lit(_MIN_FRP_MW))  # drop sub-thermal noise before correlation
 
-    g = acled.select(
+    a = acled.select(
         F.col("id").alias("acled_event_id"),
-        F.col("event_datetime").alias("g_dt"),
-        F.col("latitude").alias("g_lat"),
-        F.col("longitude").alias("g_lon"),
+        F.col("event_datetime").alias("a_dt"),
+        F.col("latitude").alias("a_lat"),
+        F.col("longitude").alias("a_lon"),
         F.col("num_sources"),
         F.col("sub_event_type").alias("event_sub_event_type"),
         F.col("description").alias("event_description"),
@@ -200,31 +188,32 @@ def compute_candidates(firms_silver: DataFrame, acled: DataFrame) -> DataFrame:
     )
 
     # Event midnight must be ≤ fire_time + 6h (timezone buffer) and ≥ fire_time - 48h.
-    # Positive time_delta_h beyond the buffer is excluded — ACLED records actual event
+    # event - 6 < fire < event + 48
+    # Positive time_delta_h beyond the buffer is excluded - ACLED records actual event
     # date, not publication time, so events recorded well after the fire are spurious.
+    # Iran (easternmost) is 3.5 hours ahead of UTC, so 6 hour buffer is more than enough - may actually be too generous
+    # Last checked 7/3/26 through PowerBI - no pairs with time_delta_h > 3
     bbox_joined = f.join(
-        F.broadcast(g),
-        (F.abs(F.col("f_lat") - F.col("g_lat")) <= lat_margin) &
-        (F.abs(F.col("f_lon") - F.col("g_lon")) <= lon_margin) &
-        (F.col("g_dt").cast("long") >= F.col("f_dt").cast("long") - _48H_S) &
-        (F.col("g_dt").cast("long") <= F.col("f_dt").cast("long") + _6H_BUFFER),
-    )
+        F.broadcast(a),
+        (F.abs(F.col("f_lat") - F.col("a_lat")) <= lat_margin)
+        & (F.abs(F.col("f_lon") - F.col("a_lon")) <= lon_margin)
+        & (F.col("a_dt").cast("long") >= F.col("f_dt").cast("long") - _48H_S)
+        & (F.col("a_dt").cast("long") <= F.col("f_dt").cast("long") + _6H_BUFFER),
+    )  # filter out those where the distance is for sure > 10 km before doing the expensive Haversine calculation
 
-    with_dist = (
-        bbox_joined
-        .withColumn(
-            "distance_m",
-            haversine_col(
-                F.col("f_lat"), F.col("f_lon"),
-                F.col("g_lat"), F.col("g_lon"),
-            ).cast(FloatType()),
-        )
-        .filter(F.col("distance_m") <= _10KM_M)
-    )
+    with_dist = bbox_joined.withColumn(
+        "distance_m",
+        haversine_col(
+            F.col("f_lat"),
+            F.col("f_lon"),
+            F.col("a_lat"),
+            F.col("a_lon"),
+        ).cast(FloatType()),
+    ).filter(F.col("distance_m") <= _10KM_M)
 
     with_time = with_dist.withColumn(
         "time_delta_h",
-        ((F.col("g_dt").cast("long") - F.col("f_dt").cast("long")) / 3600.0).cast(FloatType()),
+        ((F.col("a_dt").cast("long") - F.col("f_dt").cast("long")) / 3600.0).cast(FloatType()),
     )
 
     scored = with_time.withColumn(
@@ -234,7 +223,11 @@ def compute_candidates(firms_silver: DataFrame, acled: DataFrame) -> DataFrame:
             * F.when(F.col("confidence") == "h", F.lit(1.0)).otherwise(F.lit(0.8))
             * F.least(F.coalesce(F.col("num_sources"), F.lit(1)).cast("double") / 3.0, F.lit(1.0))
             * F.sqrt(F.lit(1.0) - F.col("distance_m").cast("double") / _10KM_M)
-            * (F.lit(1.0) - F.abs(F.col("time_delta_h").cast("double")) / _SCORE_H)
+            * (
+                F.lit(1.0) - F.abs(F.col("time_delta_h").cast("double")) / _SCORE_H
+            )  # ~ 9 hrs is the biggest possible error due to events being recorded as midnight UTC
+            # Example: strike occurs at 11:59 pm local time in westernmost Ukraine (8:59 pm UTC). It is detected by satellite immediately (orbital period of Suomi NPP is 110 min).
+            # Real timedelta is negligible, time_delta_h is 9 hours. Penalty is 0.83
         ).cast(FloatType()),
     )
 
@@ -246,9 +239,9 @@ def compute_candidates(firms_silver: DataFrame, acled: DataFrame) -> DataFrame:
         F.col("f_dt").alias("fire_acq_datetime"),
         F.col("frp").alias("fire_frp"),
         F.col("confidence").alias("fire_confidence"),
-        F.col("g_lat").alias("event_lat"),
-        F.col("g_lon").alias("event_lon"),
-        F.col("g_dt").alias("event_datetime"),
+        F.col("a_lat").alias("event_lat"),
+        F.col("a_lon").alias("event_lon"),
+        F.col("a_dt").alias("event_datetime"),
         "event_sub_event_type",
         "event_description",
         "event_location_full_name",
@@ -262,13 +255,12 @@ def compute_candidates(firms_silver: DataFrame, acled: DataFrame) -> DataFrame:
 
 # ── Delta DDL ───────────────────────────────────────────────────────────────────
 
+
 def ensure_namespace() -> None:
     spark.sql(f"CREATE CATALOG IF NOT EXISTS `{CATALOG}`")
     spark.sql(f"CREATE SCHEMA IF NOT EXISTS `{CATALOG}`.`{SCHEMA}`")
     # Volume that export_bronze.py uploads Parquet into.
-    spark.sql(
-        f"CREATE VOLUME IF NOT EXISTS `{CATALOG}`.`{SCHEMA}`.bronze_inbound"
-    )
+    spark.sql(f"CREATE VOLUME IF NOT EXISTS `{CATALOG}`.`{SCHEMA}`.bronze_inbound")
 
     spark.sql(f"""
         CREATE TABLE IF NOT EXISTS {T_FIRMS_BRONZE} (
@@ -314,16 +306,16 @@ def ensure_namespace() -> None:
     """)
 
 
-# ── Bronze load (Parquet on Volume → Delta, idempotent MERGE) ───────────────────
+# ── Bronze load (Parquet on Volume -> Delta, idempotent MERGE) ───────────────────
+
 
 def merge_bronze(src: DataFrame, target: str, key: str) -> int:
     """
     MERGE Parquet rows into a bronze Delta table on a natural key, inserting only
-    new rows. Mirrors the append-only / NOT-EXISTS bronze semantics of the Postgres
-    ingest, and makes re-running the same 14-day window idempotent.
+    new rows. Makes re-running the same 1-day window idempotent.
     """
     view = f"_src_{key}"
-    src.createOrReplaceTempView(view)
+    src.createOrReplaceTempView(view)  # turns dataframe into view to be able to use SQL
     spark.sql(f"""
         MERGE INTO {target} AS t
         USING {view} AS s
@@ -340,7 +332,7 @@ def load_bronze() -> tuple[DataFrame, DataFrame]:
     merge_bronze(firms_in, T_FIRMS_BRONZE, "id")
     merge_bronze(acled_in, T_ACLED_BRONZE, "global_event_id")
 
-    # Return the Parquet data directly — export_bronze.py already handled date scoping
+    # Return the Parquet data directly, export_bronze.py already handled date scoping
     # (rolling window or --all for archive runs). Reading back from the Delta table with
     # a time-window filter would anchor on the Delta's max timestamp and silently exclude
     # archive rows that predate the rolling window.
@@ -350,12 +342,24 @@ def load_bronze() -> tuple[DataFrame, DataFrame]:
 # ── Silver / gold writes ────────────────────────────────────────────────────────
 
 _FIRMS_SILVER_COLS = [
-    "id", "acq_datetime", "latitude", "longitude",
-    "bright_ti4", "bright_ti5", "frp", "scan", "track",
-    "satellite", "confidence", "daynight", "type", "version", "ingested_at",
+    "id",
+    "acq_datetime",
+    "latitude",
+    "longitude",
+    "bright_ti4",
+    "bright_ti5",
+    "frp",
+    "scan",
+    "track",
+    "satellite",
+    "confidence",
+    "daynight",
+    "type",
+    "version",
+    "ingested_at",
 ]
 # Pandas exports these as float64 (DoubleType); existing Delta table schema is FLOAT (FloatType).
-# Delta saveAsTable rejects the mismatch even in overwrite mode — cast explicitly.
+# Delta saveAsTable rejects the mismatch even in overwrite mode, cast explicitly.
 _FIRMS_FLOAT_COLS = ["bright_ti4", "bright_ti5", "frp", "scan", "track"]
 
 
@@ -363,7 +367,9 @@ def write_silver(firms_silver: DataFrame) -> int:
     df = firms_silver.select(_FIRMS_SILVER_COLS)
     for c in _FIRMS_FLOAT_COLS:
         df = df.withColumn(c, F.col(c).cast(FloatType()))
-    df = df.withColumn("type", F.col("type").cast("smallint"))
+    df = df.withColumn(
+        "type", F.col("type").cast("smallint")
+    )  # 0	Presumed vegetation fire, 1 Active volcano, 2 Other static land source, 3 Offshore (over water)
     df.write.format("delta").mode("overwrite").saveAsTable(T_FIRMS_SILVER)
     return spark.table(T_FIRMS_SILVER).count()
 
@@ -371,10 +377,7 @@ def write_silver(firms_silver: DataFrame) -> int:
 def write_gold(candidates: DataFrame) -> None:
     """
     Historical-archive upsert: MERGE on (firms_detection_id, acled_event_id).
-    Coordinates are denormalized into each gold row at insert time so the serving
-    view never needs to join back to silver/bronze. This makes the archive immune
-    to Postgres ID reuse: if bronze IDs are reassigned after a truncate, old gold
-    rows still carry the correct coordinates from when they were scored.
+    Ignore duplicate (detection_id, event_id) pairs.
     """
     staged = candidates.withColumn("created_at", F.current_timestamp())
     staged.createOrReplaceTempView("_corr_stage")
@@ -389,7 +392,7 @@ def write_gold(candidates: DataFrame) -> None:
 
 def build_serving_view() -> None:
     """
-    Gold serving view for Power BI: confirmed correlations only (score_display ≥ 2),
+    Gold serving view for Power BI and map UI: confirmed correlations only (score_display ≥ 2),
     one row per ACLED event (best-scoring fire). Jitter spreads co-located events
     on a 10×10 grid at 0.001° steps (±0.0045°, ≈ ±500 m) — handles dense areas
     like Gaza with 40 events at the same lat/lon. Up to 100 events per coordinate
@@ -398,6 +401,7 @@ def build_serving_view() -> None:
     spark.sql(f"""
         CREATE OR REPLACE VIEW {V_GOLD_MAP} AS
         WITH matched_ranked AS (
+            -- Appends row number column, ranks by score per ACLED event, keeps highest scoring fire-event pair
             SELECT *, ROW_NUMBER() OVER (PARTITION BY acled_event_id ORDER BY score DESC) AS _rn
             FROM {T_CORR_GOLD}
         ),
@@ -407,6 +411,7 @@ def build_serving_view() -> None:
         jittered AS (
             -- ROW_NUMBER jitter within each base coordinate (guaranteed unique; handles
             -- dense areas like Gaza with 40 events at the same lat/lon)
+            -- row number per shared coordinate, 0-indexed so that if it's the only event in that coordinate, it's unchanged except for 500 m jitter
             SELECT *, CAST(ROW_NUMBER() OVER (PARTITION BY event_lat, event_lon ORDER BY acled_event_id) - 1 AS BIGINT) AS _rank
             FROM best_matches
         )
@@ -420,10 +425,14 @@ def build_serving_view() -> None:
             j.event_lon + CAST(j._rank / 10 AS DOUBLE) * 0.001 - 0.0045 AS map_lon
         FROM jittered j
         LEFT JOIN {T_ACLED_BRONZE} a ON j.acled_event_id = a.id
-    """)
+    """)  # integer division on rank - longitude is only changed for >10 events at the same coordinate
+    # left join with bronze to get the global_event_id for verification/testing, which is not stored in the gold table
+    # NOTE: currently prevents multiple fires per event to avoid cluttering. Multiple events per fire is still allowed, but this shouldn't really happen in practice (and if it does, it's fine to preserve it).
+    # TODO: could guarantee truly one-to-one, added expense
 
 
-# ── Verification (Spark-native; no PostGIS) ─────────────────────────────────────
+# ── Verification (Spark-native) ─────────────────────────────────────
+
 
 def verify() -> None:
     print("\n-- Verification -------------------------------------------------------")
@@ -433,8 +442,8 @@ def verify() -> None:
     corr = spark.table(T_CORR_GOLD)
     n_corr = corr.count()
 
-    # Self-proximity check: replaces the PostGIS ST_DWithin audit in spark_pipeline.py.
-    # Reuses the exact dedup candidate logic — must be 0 if dedup is correct.
+    # Self-proximity check
+    # Must be 0 if dedup is correct.
     dup_pairs = _dominated_ids(silver.select("id", "latitude", "longitude", "acq_datetime")).count()
 
     stats = corr.agg(
@@ -450,18 +459,23 @@ def verify() -> None:
     if stats and stats["mn"] is not None:
         print(
             f"4. Score (raw): min={stats['mn']:.4f}  avg={stats['av']:.4f}  max={stats['mx']:.4f}"
-            f"  |  display (×1000): min={stats['mn']*1000:.1f}  avg={stats['av']*1000:.1f}  max={stats['mx']*1000:.1f}"
+            f"  |  display (×1000): min={stats['mn'] * 1000:.1f}  avg={stats['av'] * 1000:.1f}  max={stats['mx'] * 1000:.1f}"
         )
     else:
         print("4. Score: no rows")
 
     top3 = (
-        corr
-        .orderBy(F.col("score").desc())
+        corr.orderBy(F.col("score").desc())
         .select(
-            "score", "distance_m", "time_delta_h",
-            "fire_lat", "fire_lon", "fire_frp", "fire_confidence",
-            "event_location_full_name", "event_sub_event_type",
+            "score",
+            "distance_m",
+            "time_delta_h",
+            "fire_lat",
+            "fire_lon",
+            "fire_frp",
+            "fire_confidence",
+            "event_location_full_name",
+            "event_sub_event_type",
         )
         .limit(3)
         .collect()
@@ -475,7 +489,7 @@ def verify() -> None:
                 f"loc={r['event_location_full_name']}  sub_type={r['event_sub_event_type']}"
             )
 
-    # Contract assertions — fail the job task on violation (mirrors _validate_pipeline).
+    # Contract assertions, fail the job task on violation (mirrors _validate_pipeline).
     if n_silver == 0:
         raise SystemExit("Validation failed: firms_silver is empty")
     if dup_pairs > 0:
@@ -486,8 +500,9 @@ def verify() -> None:
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
+
 def main() -> None:
-    print(f"Phase 4 Databricks pipeline  |  catalog={CATALOG} schema={SCHEMA}")
+    print(f"Databricks pipeline  |  catalog={CATALOG} schema={SCHEMA}")
     print(f"  source: Volume Parquet at {VOLUME_INBOUND} (written by firms_ingest.py / acled_ingest.py)")
 
     ensure_namespace()
@@ -496,8 +511,8 @@ def main() -> None:
     firms_raw, acled_raw = load_bronze()
     n_firms_raw = firms_raw.count()
     n_acled_raw = acled_raw.count()
-    print(f"  firms_detections : {n_firms_raw:,} rows (14-day window)")
-    print(f"  acled_events     : {n_acled_raw:,} rows (14-day window)")
+    print(f"  firms_detections : {n_firms_raw:,} rows (1-day window)")
+    print(f"  acled_events     : {n_acled_raw:,} rows (1-day window)")
 
     print("\nApplying silver transform (confidence filter + satellite-pass dedup)...")
     firms_silver = satellite_pass_dedup(confidence_filter(firms_raw))
@@ -510,7 +525,7 @@ def main() -> None:
     # Read the persisted silver back so the candidate join reuses the materialized
     # dedup result instead of recomputing the grid-bin explode + anti-join. Serverless
     # has no .cache() (it triggers PERSIST TABLE), so the silver Delta table is the
-    # materialization point — the analogue of spark_pipeline.py's firms_silver.cache().
+    # materialization point
     firms_silver = spark.table(T_FIRMS_SILVER)
 
     print("\nComputing FIRMS x ACLED candidates (10 km / event_midnight ±48 h / +6 h buffer)...")

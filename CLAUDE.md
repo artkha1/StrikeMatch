@@ -14,7 +14,7 @@ Two theaters only: **Russia/Ukraine + the Middle East**. FIRMS fire data and ACL
 events are both restricted to these regions — FIRMS via the regional/country bboxes in
 `firms_ingest.py`, ACLED via the `country=` API filter in `acled_ingest.py`.
 
-**Date range: 2022-02-01 to today-1 year** (start of Russia-Ukraine war). ACLED Research-tier
+**Date range: 2022-02-24 to today-1 year** (start of Russia-Ukraine war). ACLED Research-tier
 access has a ~1-year publication lag, so the practical ceiling for all data is ~today − 1 year.
 FIRMS SP archive products cover any date, with no embargo.
 

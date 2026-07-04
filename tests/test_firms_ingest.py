@@ -38,6 +38,7 @@ def _raw_row(**overrides) -> dict:
 
 # ── _in_conflict_zone ───────────────────────────────────────────────────────────
 
+
 def test_in_conflict_zone_ukraine():
     assert _in_conflict_zone(50.45, 30.52)  # Kyiv
 
@@ -48,15 +49,16 @@ def test_in_conflict_zone_gaza():
 
 def test_outside_conflict_zone_athens():
     # Greece sits inside the "Eastern Europe / Russia" regional bbox but is not
-    # a conflict country — the per-country filter must reject it.
+    # a conflict country, the per-country filter must reject it.
     assert not _in_conflict_zone(37.98, 23.72)
 
 
 def test_outside_conflict_zone_ocean():
-    assert not _in_conflict_zone(30.0, -40.0)
+    assert not _in_conflict_zone(30.0, -40.0)  # middle of North Atlantic Ocean
 
 
 # ── _date_chunks ────────────────────────────────────────────────────────────────
+
 
 def test_date_chunks_single_day():
     assert _date_chunks(date(2024, 8, 18), date(2024, 8, 18), 5) == [(date(2024, 8, 18), 1)]
@@ -77,10 +79,13 @@ def test_date_chunks_cover_range_contiguously():
     assert sum(n for _, n in chunks) == (end - start).days + 1
     assert chunks[0][0] == start
     for (d1, n1), (d2, _) in zip(chunks, chunks[1:]):
-        assert (d2 - d1).days == n1
+        assert (
+            (d2 - d1).days == n1
+        )  # difference in dates between consecutive chunks equals the number of days in the first chunk of each pair
 
 
 # ── field parsing helpers ───────────────────────────────────────────────────────
+
 
 def test_f_and_i_parse_values():
     assert _f({"frp": "43.4"}, "frp") == 43.4
@@ -95,17 +100,18 @@ def test_f_and_i_empty_or_missing_return_none():
 
 # ── parse_row ───────────────────────────────────────────────────────────────────
 
+
 def test_parse_row_valid():
     t = parse_row(_raw_row())
     assert t is not None
     acq_dt, lat, lon = t[0], t[1], t[2]
     assert acq_dt == datetime(2024, 8, 18, 0, 55, tzinfo=timezone.utc)
     assert (lat, lon) == (50.4501, 30.5234)
-    assert t[5] == 43.4          # frp
-    assert t[8] == "N20"         # satellite
-    assert t[9] == "h"           # confidence
-    assert t[10] == "N"          # daynight
-    assert t[11] == 0            # type
+    assert t[5] == 43.4  # frp
+    assert t[8] == "N20"  # satellite
+    assert t[9] == "h"  # confidence
+    assert t[10] == "N"  # daynight
+    assert t[11] == 0  # type
 
 
 def test_parse_row_pads_short_acq_time():
@@ -125,6 +131,7 @@ def test_parse_row_bad_date_returns_none():
 
 
 # ── _build_dataframe ────────────────────────────────────────────────────────────
+
 
 def test_build_dataframe_schema_and_ids():
     rows = [parse_row(_raw_row()), parse_row(_raw_row(latitude="48.0", longitude="37.8"))]

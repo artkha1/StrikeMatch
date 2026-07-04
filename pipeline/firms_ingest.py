@@ -8,6 +8,7 @@ Usage:
     python firms_ingest.py --start 2025-01-14 --end 2025-01-15  # archive range
 Requires FIRMS_MAP_KEY, DATABRICKS_HOST, DATABRICKS_TOKEN, DATABRICKS_VOLUME_PATH in .env
 """
+
 import argparse
 import csv
 import os
@@ -26,9 +27,7 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 FIRMS_MAP_KEY: str = os.environ["FIRMS_MAP_KEY"]
-VOLUME_PATH = os.environ.get(
-    "DATABRICKS_VOLUME_PATH", "/Volumes/workspace/fire_pipeline/bronze_inbound"
-).rstrip("/")
+VOLUME_PATH = os.environ.get("DATABRICKS_VOLUME_PATH", "/Volumes/workspace/fire_pipeline/bronze_inbound").rstrip("/")
 FIRMS_BASE = "https://firms.modaps.eosdis.nasa.gov/api/area/csv"
 DATA_LAG_DAYS = int(os.environ.get("DATA_LAG_DAYS", "0"))
 LOOKBACK_DAYS = 1
@@ -39,7 +38,7 @@ if DATA_LAG_DAYS > 10:
     VIIRS_SOURCES = ["VIIRS_SNPP_SP", "VIIRS_NOAA20_SP"]
 else:
     VIIRS_SOURCES = ["VIIRS_SNPP_NRT", "VIIRS_NOAA20_NRT"]  # NOAA-21 omitted: near-identical orbit to NOAA-20
-# API hard-caps at 5 days per request for global bbox; chunk accordingly.
+# API hard-caps at 5 days per request for global bbox; chunk accordingly. TODO: limit could be higher for regional bboxes
 MAX_DAYS_PER_REQUEST = 5
 
 # Regional bounding boxes sent directly to the FIRMS API (format: "W,S,E,N").
@@ -51,25 +50,25 @@ MAX_DAYS_PER_REQUEST = 5
 # Keep in sync with ACLED_COUNTRIES in acled_ingest.py.
 COUNTRY_BBOXES: dict[str, tuple[float, float, float, float]] = {
     # Russia/Ukraine theater
-    "UP": (44.0,  52.5,  22.0,  40.5),   # Ukraine
-    "RS": (41.0,  82.0,  19.0, 180.0),   # Russia
+    "UP": (44.0, 52.5, 22.0, 40.5),  # Ukraine
+    "RS": (41.0, 82.0, 19.0, 180.0),  # Russia
     # Middle East theater
-    "IS": (29.0,  33.5,  34.0,  36.0),   # Israel
-    "GZ": (31.2,  31.6,  34.2,  34.6),   # Gaza Strip
-    "WE": (31.3,  32.6,  34.8,  35.6),   # West Bank
-    "SY": (32.5,  37.5,  35.5,  42.5),   # Syria
-    "IZ": (29.0,  38.0,  38.5,  48.5),   # Iraq
-    "YM": (12.0,  19.0,  42.5,  55.0),   # Yemen
-    "LE": (33.0,  34.7,  35.0,  36.7),   # Lebanon
-    "IR": (25.0,  40.0,  44.0,  64.0),   # Iran
-    "TU": (35.8,  42.5,  25.5,  44.5),   # Turkey
-    "QA": (24.5,  26.5,  50.5,  51.7),   # Qatar
-    "KU": (28.5,  30.2,  46.5,  48.5),   # Kuwait
-    "SA": (16.0,  32.0,  34.5,  55.5),   # Saudi Arabia
-    "BA": (25.5,  26.5,  50.3,  50.8),   # Bahrain
-    "MU": (16.5,  26.5,  52.0,  60.0),   # Oman
-    "JO": (29.0,  33.5,  34.5,  39.5),   # Jordan
-    "AE": (22.5,  26.0,  51.0,  56.5),   # UAE
+    "IS": (29.0, 33.5, 34.0, 36.0),  # Israel
+    "GZ": (31.2, 31.6, 34.2, 34.6),  # Gaza Strip
+    "WE": (31.3, 32.6, 34.8, 35.6),  # West Bank
+    "SY": (32.5, 37.5, 35.5, 42.5),  # Syria
+    "IZ": (29.0, 38.0, 38.5, 48.5),  # Iraq
+    "YM": (12.0, 19.0, 42.5, 55.0),  # Yemen
+    "LE": (33.0, 34.7, 35.0, 36.7),  # Lebanon
+    "IR": (25.0, 40.0, 44.0, 64.0),  # Iran
+    "TU": (35.8, 42.5, 25.5, 44.5),  # Turkey
+    "QA": (24.5, 26.5, 50.5, 51.7),  # Qatar
+    "KU": (28.5, 30.2, 46.5, 48.5),  # Kuwait
+    "SA": (16.0, 32.0, 34.5, 55.5),  # Saudi Arabia
+    "BA": (25.5, 26.5, 50.3, 50.8),  # Bahrain
+    "MU": (16.5, 26.5, 52.0, 60.0),  # Oman
+    "JO": (29.0, 33.5, 34.5, 39.5),  # Jordan
+    "AE": (22.5, 26.0, 51.0, 56.5),  # UAE
 }
 
 
@@ -82,13 +81,14 @@ def _in_conflict_zone(lat: float, lon: float) -> bool:
 
 REGION_BBOXES: list[tuple[str, str]] = [
     # (label,                    "W,S,E,N")
-    ("Eastern Europe / Russia",  "19,41,180,82"),   # Ukraine, Russia
-    ("Middle East",              "25,12,64,43"),    # Israel/Gaza/WB, Lebanon, Syria, Iraq,
-                                                    # Yemen, Iran, Turkey, Gulf states, Jordan
+    ("Eastern Europe / Russia", "19,41,180,82"),  # Ukraine, Russia
+    ("Middle East", "25,12,64,43"),  # Israel/Gaza/WB, Lebanon, Syria, Iraq,
+    # Yemen, Iran, Turkey, Gulf states, Jordan
 ]
 
 
 # -- Fetch ---------------------------------------------------------------------
+
 
 def _date_chunks(start: date, end: date, max_per: int) -> list[tuple[date, int]]:
     """Split [start .. end] into (start_date, count) chunks."""
@@ -110,7 +110,7 @@ def _fetch_chunk(url: str, retries: int = 3, backoff: int = 30) -> list[dict]:
             with requests.get(url, timeout=(10, 300), stream=True) as resp:
                 resp.raise_for_status()
                 if "text/html" in resp.headers.get("Content-Type", ""):
-                    raise ValueError("API returned HTML — check MAP key / product name")
+                    raise ValueError("API returned HTML - check MAP key / product name")
                 return list(csv.DictReader(resp.iter_lines(decode_unicode=True)))
         except (requests.RequestException, TimeoutError) as exc:
             if attempt == retries:
@@ -135,6 +135,7 @@ def fetch_source(source: str, start: date, end: date, bbox: str) -> list[dict]:
 
 # -- Parse ---------------------------------------------------------------------
 
+
 def _f(raw: dict, key: str) -> float | None:
     v = raw.get(key, "").strip()
     return float(v) if v else None
@@ -149,17 +150,20 @@ def parse_row(raw: dict) -> tuple | None:
     try:
         lat = float(raw["latitude"])
         lon = float(raw["longitude"])
-        t = raw["acq_time"].zfill(4)
-        acq_dt = datetime.strptime(
-            f"{raw['acq_date']} {t[:2]}:{t[2:]}", "%Y-%m-%d %H:%M"
-        ).replace(tzinfo=timezone.utc)
+        t = raw["acq_time"].zfill(4)  # pad hours with leading zeroes (e.g. 05:42 instead of 5:42)
+        acq_dt = datetime.strptime(f"{raw['acq_date']} {t[:2]}:{t[2:]}", "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
     except (KeyError, ValueError):
         return None
 
     return (
-        acq_dt, lat, lon,
-        _f(raw, "bright_ti4"), _f(raw, "bright_ti5"), _f(raw, "frp"),
-        _f(raw, "scan"), _f(raw, "track"),
+        acq_dt,
+        lat,
+        lon,
+        _f(raw, "bright_ti4"),
+        _f(raw, "bright_ti5"),
+        _f(raw, "frp"),
+        _f(raw, "scan"),
+        _f(raw, "track"),
         (raw.get("satellite") or "")[:10] or None,
         (raw.get("confidence") or "")[:10] or None,
         (raw.get("daynight") or "")[:1] or None,
@@ -171,21 +175,43 @@ def parse_row(raw: dict) -> tuple | None:
 # -- DataFrame + upload -------------------------------------------------------
 
 _FIRMS_COLS = [
-    "acq_datetime", "latitude", "longitude",
-    "bright_ti4", "bright_ti5", "frp", "scan", "track",
-    "satellite", "confidence", "daynight", "type", "version",
+    "acq_datetime",
+    "latitude",
+    "longitude",
+    "bright_ti4",
+    "bright_ti5",
+    "frp",
+    "scan",
+    "track",
+    "satellite",
+    "confidence",
+    "daynight",
+    "type",
+    "version",
 ]
 
 _DELTA_COL_ORDER = [
-    "id", "acq_datetime", "latitude", "longitude",
-    "bright_ti4", "bright_ti5", "frp", "scan", "track",
-    "satellite", "confidence", "daynight", "type", "version", "ingested_at",
+    "id",
+    "acq_datetime",
+    "latitude",
+    "longitude",
+    "bright_ti4",
+    "bright_ti5",
+    "frp",
+    "scan",
+    "track",
+    "satellite",
+    "confidence",
+    "daynight",
+    "type",
+    "version",
+    "ingested_at",
 ]
 
 
 def _build_dataframe(rows: list[tuple]) -> pd.DataFrame:
     df = pd.DataFrame(rows, columns=_FIRMS_COLS)
-    # Stable hash ID from natural key — keeps the Delta MERGE idempotent on re-runs.
+    # Stable hash ID from natural key, keeps the Delta MERGE idempotent on re-runs.
     # pd.util.hash_pandas_object is deterministic within a pandas version.
     df["id"] = pd.util.hash_pandas_object(
         df[["acq_datetime", "latitude", "longitude", "satellite"]], index=False
@@ -205,17 +231,20 @@ def _upload(df: pd.DataFrame, subdir: str) -> None:
             w.files.upload(target, fh, overwrite=True)
     finally:
         os.unlink(tmp_path)
-    print(f"  Uploaded → {target}  ({len(df):,} rows)")
+    print(f"  Uploaded -> {target}  ({len(df):,} rows)")
 
 
 # -- Main ----------------------------------------------------------------------
 
+
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Ingest FIRMS VIIRS fire detections into Databricks UC Volume.")
-    p.add_argument("--start", type=date.fromisoformat, metavar="YYYY-MM-DD",
-                   help="Archive start date (inclusive). Requires --end.")
-    p.add_argument("--end",   type=date.fromisoformat, metavar="YYYY-MM-DD",
-                   help="Archive end date (inclusive). Requires --start.")
+    p.add_argument(
+        "--start", type=date.fromisoformat, metavar="YYYY-MM-DD", help="Archive start date (inclusive). Requires --end."
+    )
+    p.add_argument(
+        "--end", type=date.fromisoformat, metavar="YYYY-MM-DD", help="Archive end date (inclusive). Requires --start."
+    )
     args = p.parse_args()
     if bool(args.start) != bool(args.end):
         p.error("--start and --end must be used together")
@@ -228,9 +257,13 @@ def main() -> None:
     if args.start and args.end:
         start_date, end_date = args.start, args.end
         days_ago = (date.today() - start_date).days
-        viirs_sources = ["VIIRS_SNPP_SP", "VIIRS_NOAA20_SP"] if days_ago > 10 else ["VIIRS_SNPP_NRT", "VIIRS_NOAA20_NRT"]
+        viirs_sources = (
+            ["VIIRS_SNPP_SP", "VIIRS_NOAA20_SP"] if days_ago > 10 else ["VIIRS_SNPP_NRT", "VIIRS_NOAA20_NRT"]
+        )
         product_type = "SP (archive)" if days_ago > 10 else "NRT"
-        print(f"Fetching FIRMS VIIRS 375m {product_type} [archive] ({start_date} to {end_date}, {len(REGION_BBOXES)} regions)...")
+        print(
+            f"Fetching FIRMS VIIRS 375m {product_type} [archive] ({start_date} to {end_date}, {len(REGION_BBOXES)} regions)..."
+        )
     else:
         today = date.today() - timedelta(days=DATA_LAG_DAYS)
         start_date = today - timedelta(days=LOOKBACK_DAYS - 1)
@@ -238,16 +271,17 @@ def main() -> None:
         viirs_sources = VIIRS_SOURCES
         product_type = "SP (archive)" if DATA_LAG_DAYS > 10 else "NRT"
         lag_note = f"  (lag={DATA_LAG_DAYS}d, real date {date.today()})" if DATA_LAG_DAYS else ""
-        print(f"Fetching FIRMS VIIRS 375m {product_type} ({LOOKBACK_DAYS}-day, {len(REGION_BBOXES)} regions, ending {end_date}{lag_note})...")
+        print(
+            f"Fetching FIRMS VIIRS 375m {product_type} ({LOOKBACK_DAYS}-day, {len(REGION_BBOXES)} regions, ending {end_date}{lag_note})..."
+        )
 
-    tasks = [
-        (src, bbox, label)
-        for label, bbox in REGION_BBOXES
-        for src in viirs_sources
-    ]
+    tasks = [(src, bbox, label) for label, bbox in REGION_BBOXES for src in viirs_sources]
     raw_rows: list[dict] = []
+    # 1 thread per (source, region) pair; 4 total; each thread may make multiple requests if the date range exceeds MAX_DAYS_PER_REQUEST
     with ThreadPoolExecutor(max_workers=16) as pool:
-        futures = {pool.submit(fetch_source, src, start_date, end_date, bbox): (src, label) for src, bbox, label in tasks}
+        futures = {
+            pool.submit(fetch_source, src, start_date, end_date, bbox): (src, label) for src, bbox, label in tasks
+        }  # preserve source and label for logging
         for fut in as_completed(futures):
             src, label = futures[fut]
             try:
