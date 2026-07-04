@@ -27,8 +27,8 @@ sys.path.insert(0, str(_ROOT))
 
 # firms_ingest requires FIRMS_MAP_KEY at import; validation only needs its bboxes.
 os.environ.setdefault("FIRMS_MAP_KEY", "unused-for-validation")
-from pipeline.firms_ingest import COUNTRY_BBOXES  # noqa: E402
 from pipeline.acled_ingest import STRIKE_SUBTYPES  # noqa: E402
+from pipeline.firms_ingest import COUNTRY_BBOXES  # noqa: E402
 
 EVENTS_PATH = _ROOT / "dashboard" / "data" / "events.json"
 METADATA_PATH = _ROOT / "dashboard" / "data" / "metadata.json"
