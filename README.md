@@ -105,7 +105,7 @@ Failure notifications come from GitHub's built-in email alerts (no SMTP config r
 
 ### Option B: Airflow on Docker (local)
 
-Richer UI with a DAG graph, task logs, and manual backfill support, but requires the machine to stay on.
+Richer UI with a DAG graph, task logs, retries, and manual backfill support, but requires the machine to stay on.
 
 ```bash
 cp .env.example .env          # fill in FIRMS, ACLED, Databricks, and SMTP credentials
