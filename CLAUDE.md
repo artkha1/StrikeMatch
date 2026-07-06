@@ -42,14 +42,22 @@ FIRMS SP archive products cover any date, with no embargo.
 # Stack
 - Python 3.x, requests, pandas, databricks-sdk, pyarrow (`requirements.txt` — local ingest only)
 - PySpark — Databricks serverless (`spark_pipeline_databricks.py`, primary); **not** in `requirements.txt`
-- Apache Airflow 2.9.2 via Docker Compose — triggers the Databricks job on schedule
+- **Scheduling — two options (see below)**
 - Power BI serves the gold layer from a Databricks serverless SQL warehouse
 - ACLED conflict-event source via OAuth API (~1-year research lag)
 - NASA FIRMS MAP Key + ACLED OAuth + Databricks PAT read from `.env`
 
 **Postgres/PostGIS removed** — ingest scripts write Parquet directly to the UC Volume.
 
-**Docker Compose services:** `airflow-db` (Postgres 16 metadata store), `airflow-init` (one-shot schema migration + admin user creation), `airflow-scheduler` (LocalExecutor; loads `.env`; mounts `.:/opt/pipeline:ro` so ingest scripts run inside the container), `airflow-webserver` (port 8080). `Dockerfile.airflow` pins `apache-airflow-providers-databricks` under Airflow constraints.
+## Scheduling options
+
+**Option A: GitHub Actions (recommended)** — `.github/workflows/pipeline.yml`
+Runs on GitHub's servers at 06:00 UTC daily; no always-on machine required. Secrets are stored in GitHub repo Settings → Secrets. `ingest_firms` and `ingest_acled` run as parallel jobs; `run-pipeline` waits for both, triggers the Databricks job via REST API (polls until `TERMINATED`), then exports and pushes. Failure notifications come from GitHub's built-in email alerts.
+
+**Option B: Airflow on Docker (local)** — `dags/fire_event_pipeline.py`
+Requires the machine to stay on. Gives a full DAG graph UI at `http://localhost:8080`. Configure SMTP in `.env` (`AIRFLOW__SMTP__*`) for failure email alerts; set `ALERT_EMAIL` for the recipient.
+
+**Docker Compose services (Option B only):** `airflow-db` (Postgres 16 metadata store), `airflow-init` (one-shot schema migration + admin user creation), `airflow-scheduler` (LocalExecutor; loads `.env`; mounts `.:/opt/pipeline:ro` so ingest scripts run inside the container), `airflow-webserver` (port 8080). `Dockerfile.airflow` pins `apache-airflow-providers-databricks` under Airflow constraints.
 
 ---
 

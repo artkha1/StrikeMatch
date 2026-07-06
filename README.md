@@ -14,7 +14,7 @@
 
 ```mermaid
 flowchart TB
-    AF["Airflow (Docker)<br/>daily 06:00 UTC"]
+    AF["Airflow (Docker) or GitHub Actions <br/>daily 06:00 UTC"]
 
     subgraph pipeline[" "]
         direction LR
@@ -39,7 +39,7 @@ flowchart TB
 
 1. **Ingest** — `pipeline/firms_ingest.py` pulls VIIRS I-Band 375 m detections (NRT for recent dates, SP archive otherwise) for the two theaters; `pipeline/acled_ingest.py` pulls ACLED *Air/drone strike* and *Shelling/artillery/missile attack* events with site-precise coordinates (`geo_precision` 1–2). Both write Parquet straight to a Databricks Unity Catalog Volume.
 2. **Transform** — a serverless Databricks job (`pipeline/spark_pipeline_databricks.py`) MERGEs bronze Delta tables, deduplicates overlapping satellite passes (grid-bin + Haversine anti-join, 1 km / 6 h), and computes the scored FIRMS × ACLED correlation join.
-3. **Serve** — a gold view keeps only confirmed matches (best-scoring fire per ACLED event); `pipeline/export_data.py` exports it to compact columnar JSON, a Great Expectations gate validates it, and Airflow commits it for GitHub Pages.
+3. **Serve** — a gold view keeps only confirmed matches (best-scoring fire per ACLED event); `pipeline/export_data.py` exports it to compact columnar JSON, a Great Expectations gate validates it, and Airflow/GitHub Actions commits it for GitHub Pages.
 
 ### Match definition & scoring
 
@@ -84,19 +84,39 @@ dags/fire_event_pipeline.py   Airflow DAG (daily 06:00 UTC)
 dashboard/index.html          Leaflet dashboard (static, GitHub Pages)
 dashboard/data/               exported events + metadata (auto-committed daily)
 tests/                        unit + Spark-transform + data-quality tests
-.github/workflows/            ci.yml · data-quality.yml · pages.yml
+.github/workflows/            ci.yml · data-quality.yml · pages.yml · pipeline.yml
 ```
 
 ## Running it yourself
 
-Prerequisites: Docker, Python 3.10+, a free [FIRMS MAP key](https://firms.modaps.eosdis.nasa.gov/api/), [ACLED](https://acleddata.com/) credentials (Research tier — data trails real-time by ~1 year), and a Databricks workspace (Free Edition works) with a SQL warehouse.
+Prerequisites: Python 3.10+, a free [FIRMS MAP key](https://firms.modaps.eosdis.nasa.gov/api/), [ACLED](https://acleddata.com/) credentials (Research tier - data trails real-time by ~1 year), and a Databricks workspace (Free Edition works) with a SQL warehouse.
+
+Two scheduling options, pick one:
+
+### Option A: GitHub Actions (recommended)
+
+No always-on machine needed. GitHub's servers run the pipeline daily at 06:00 UTC.
+
+1. Fork or push this repo to GitHub.
+2. Go to **Settings → Secrets and variables → Actions** and add each value from `.env.example` as a repository secret (`FIRMS_MAP_KEY`, `ACLED_USERNAME`, `ACLED_PASSWORD`, `DATABRICKS_HOST`, `DATABRICKS_TOKEN`, `DATABRICKS_VOLUME_PATH`, `DATABRICKS_JOB_ID`, `DATABRICKS_SQL_HTTP_PATH`).
+3. The `pipeline.yml` workflow runs automatically, or trigger it manually from the **Actions** tab.
+
+Failure notifications come from GitHub's built-in email alerts (no SMTP config required).
+
+### Option B: Airflow on Docker (local)
+
+Richer UI with a DAG graph, task logs, and manual backfill support, but requires the machine to stay on.
 
 ```bash
-cp .env.example .env          # fill in FIRMS, ACLED, Databricks credentials
+cp .env.example .env          # fill in FIRMS, ACLED, Databricks, and SMTP credentials
 docker compose up -d          # Airflow at http://localhost:8080 (admin/admin)
 ```
 
-The `fire_event_pipeline` DAG runs daily: ingest (parallel) → Databricks job → validate → export → data-quality gate → git push. Manual/backfill runs:
+The `fire_event_pipeline` DAG runs daily at 06:00 UTC: ingest (parallel) → Databricks job → validate → export → data-quality gate → git push.
+
+---
+
+Manual/backfill runs (both options):
 
 ```bash
 python pipeline/firms_ingest.py --start 2022-02-24 --end 2022-02-28

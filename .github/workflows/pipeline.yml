@@ -1,0 +1,105 @@
+name: Daily Pipeline
+
+on:
+  schedule:
+    - cron: "0 6 * * *"   # 06:00 UTC daily
+  workflow_dispatch:       # manual trigger from GitHub Actions UI
+
+permissions:
+  contents: write          # needed for the data-export git push
+
+jobs:
+  # ── Ingest (parallel) ─────────────────────────────────────────────────────
+  ingest-firms:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Fetch FIRMS detections -> UC Volume
+        run: python pipeline/firms_ingest.py
+        env:
+          FIRMS_MAP_KEY: ${{ secrets.FIRMS_MAP_KEY }}
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+          DATABRICKS_VOLUME_PATH: ${{ secrets.DATABRICKS_VOLUME_PATH }}
+          DATA_LAG_DAYS: 364
+
+  ingest-acled:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Fetch ACLED strike events -> UC Volume
+        run: python pipeline/acled_ingest.py
+        env:
+          ACLED_USERNAME: ${{ secrets.ACLED_USERNAME }}
+          ACLED_PASSWORD: ${{ secrets.ACLED_PASSWORD }}
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+          DATABRICKS_VOLUME_PATH: ${{ secrets.DATABRICKS_VOLUME_PATH }}
+          DATA_LAG_DAYS: 364
+
+  # ── Transform -> Export -> Validate -> Publish ───────────────────────────────
+  run-pipeline:
+    needs: [ingest-firms, ingest-acled]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+
+      - name: Trigger Databricks job and wait for completion
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+          DATABRICKS_JOB_ID: ${{ secrets.DATABRICKS_JOB_ID }}
+        run: |
+          RUN_ID=$(curl -sf -X POST "$DATABRICKS_HOST/api/2.1/jobs/run-now" \
+            -H "Authorization: Bearer $DATABRICKS_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"job_id\": $DATABRICKS_JOB_ID}" | jq -r '.run_id')
+          echo "Triggered Databricks run $RUN_ID"
+          while true; do
+            RESPONSE=$(curl -sf "$DATABRICKS_HOST/api/2.1/jobs/runs/get?run_id=$RUN_ID" \
+              -H "Authorization: Bearer $DATABRICKS_TOKEN")
+            STATE=$(echo "$RESPONSE" | jq -r '.state.life_cycle_state')
+            RESULT=$(echo "$RESPONSE" | jq -r '.state.result_state // empty')
+            echo "  state=$STATE result=$RESULT"
+            if [ "$STATE" = "TERMINATED" ]; then
+              [ "$RESULT" = "SUCCESS" ] || { echo "Databricks job failed: $RESULT"; exit 1; }
+              break
+            fi
+            sleep 30
+          done
+
+      - name: Export gold view -> dashboard/data/
+        run: python pipeline/export_data.py
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+          DATABRICKS_SQL_HTTP_PATH: ${{ secrets.DATABRICKS_SQL_HTTP_PATH }}
+          FP_CATALOG: ${{ secrets.FP_CATALOG }}
+          FP_SCHEMA: ${{ secrets.FP_SCHEMA }}
+
+      - name: Validate export (Great Expectations gate)
+        run: python pipeline/validate_export.py
+
+      - name: Commit and push data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add dashboard/data/events.json dashboard/data/metadata.json
+          git diff --cached --quiet && echo "No data changes, skipping push" && exit 0
+          git commit -m "data: export $(date -u +%Y-%m-%d)"
+          git push

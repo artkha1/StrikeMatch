@@ -103,7 +103,9 @@ def _column_checks_ge(df: pd.DataFrame, has_ids: bool) -> list[str]:
     for col, lo, hi in BOUNDS:
         suite.add_expectation(gxe.ExpectColumnValuesToBeBetween(column=col, min_value=lo, max_value=hi))
     suite.add_expectation(gxe.ExpectColumnValuesToBeInSet(column="fire_confidence", value_set=["h", "n"]))
-    suite.add_expectation(gxe.ExpectColumnValuesToBeInSet(column="event_sub_event_type", value_set=list(STRIKE_SUBTYPES)))
+    suite.add_expectation(
+        gxe.ExpectColumnValuesToBeInSet(column="event_sub_event_type", value_set=list(STRIKE_SUBTYPES))
+    )
 
     results = batch.validate(suite)
 
