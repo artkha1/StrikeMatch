@@ -84,7 +84,7 @@ dags/fire_event_pipeline.py   Airflow DAG (daily 07:17 UTC)
 dashboard/index.html          Leaflet dashboard (static, GitHub Pages)
 dashboard/data/               exported events + metadata (auto-committed daily)
 tests/                        unit + Spark-transform + data-quality tests
-.github/workflows/            ci.yml · data-quality.yml · pages.yml · pipeline.yml
+.github/workflows/            ci.yml, data-quality.yml, pages.yml, pipeline.yml
 ```
 
 ## Running it yourself
