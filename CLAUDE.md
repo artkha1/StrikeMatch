@@ -52,7 +52,7 @@ FIRMS SP archive products cover any date, with no embargo.
 ## Scheduling options
 
 **Option A: GitHub Actions (recommended)** — `.github/workflows/pipeline.yml`
-Runs on GitHub's servers at 06:00 UTC daily; no always-on machine required. Secrets are stored in GitHub repo Settings → Secrets. `ingest_firms` and `ingest_acled` run as parallel jobs; `run-pipeline` waits for both, triggers the Databricks job via REST API (polls until `TERMINATED`), then exports and pushes. Failure notifications come from GitHub's built-in email alerts.
+Runs on GitHub's servers at 07:17 UTC daily; no always-on machine required. Secrets are stored in GitHub repo Settings → Secrets. `ingest_firms` and `ingest_acled` run as parallel jobs; `run-pipeline` waits for both, triggers the Databricks job via REST API (polls until `TERMINATED`), then exports and pushes. Failure notifications come from GitHub's built-in email alerts.
 
 **Option B: Airflow on Docker (local)** — `dags/fire_event_pipeline.py`
 Requires the machine to stay on. Gives a full DAG graph UI at `http://localhost:8080`. Configure SMTP in `.env` (`AIRFLOW__SMTP__*`) for failure email alerts; set `ALERT_EMAIL` for the recipient.
@@ -129,7 +129,7 @@ Trigger job: Databricks Workflows UI → `fire_event_pipeline` → Run now.
 
 ### Airflow UI
 - URL: http://localhost:8080 (credentials: admin/admin)
-- DAG: `fire_event_pipeline` — daily 06:00 UTC
+- DAG: `fire_event_pipeline` — daily 07:17 UTC
 - Task graph:
   ```
   ingest_firms ─┐

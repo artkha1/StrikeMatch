@@ -14,7 +14,7 @@
 
 ```mermaid
 flowchart TB
-    AF["Airflow (Docker) or GitHub Actions <br/>daily 06:00 UTC"]
+    AF["Airflow (Docker) or GitHub Actions <br/>daily 07:17 UTC"]
 
     subgraph pipeline[" "]
         direction LR
@@ -80,7 +80,7 @@ pipeline/                     ingest, Spark job, export, data-quality gate
   spark_pipeline_databricks.py  bronze → silver → gold (runs on Databricks serverless)
   export_data.py              gold view → dashboard/data/*.json
   validate_export.py          Great Expectations gate (blocks bad publishes)
-dags/fire_event_pipeline.py   Airflow DAG (daily 06:00 UTC)
+dags/fire_event_pipeline.py   Airflow DAG (daily 07:17 UTC)
 dashboard/index.html          Leaflet dashboard (static, GitHub Pages)
 dashboard/data/               exported events + metadata (auto-committed daily)
 tests/                        unit + Spark-transform + data-quality tests
@@ -95,7 +95,7 @@ Two scheduling options, pick one:
 
 ### Option A: GitHub Actions (recommended)
 
-No always-on machine needed. GitHub's servers run the pipeline daily at 06:00 UTC.
+No always-on machine needed. GitHub's servers run the pipeline daily at 07:17 UTC.
 
 1. Fork or push this repo to GitHub.
 2. Go to **Settings → Secrets and variables → Actions** and add each value from `.env.example` as a repository secret (`FIRMS_MAP_KEY`, `ACLED_USERNAME`, `ACLED_PASSWORD`, `DATABRICKS_HOST`, `DATABRICKS_TOKEN`, `DATABRICKS_VOLUME_PATH`, `DATABRICKS_JOB_ID`, `DATABRICKS_SQL_HTTP_PATH`).
@@ -112,7 +112,7 @@ cp .env.example .env          # fill in FIRMS, ACLED, Databricks, and SMTP crede
 docker compose up -d          # Airflow at http://localhost:8080 (admin/admin)
 ```
 
-The `fire_event_pipeline` DAG runs daily at 06:00 UTC: ingest (parallel) → Databricks job → validate → export → data-quality gate → git push.
+The `fire_event_pipeline` DAG runs daily at 07:17 UTC: ingest (parallel) → Databricks job → validate → export → data-quality gate → git push.
 
 ---
 

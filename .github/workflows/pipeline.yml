@@ -2,7 +2,7 @@ name: Daily Pipeline
 
 on:
   schedule:
-    - cron: "0 6 * * *"   # 06:00 UTC daily
+    - cron: "17 7 * * *"   # 07:17 UTC daily
   workflow_dispatch:       # manual trigger from GitHub Actions UI
 
 permissions:

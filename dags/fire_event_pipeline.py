@@ -64,7 +64,7 @@ def _validate_pipeline() -> None:
 
 with DAG(
     dag_id="fire_event_pipeline",
-    schedule="0 6 * * *",
+    schedule="17 7 * * *",
     start_date=datetime(2026, 6, 20),
     catchup=False,
     max_active_runs=1,
@@ -88,7 +88,7 @@ ingest_acled ─┘
 ```
 
 All tasks are **idempotent** — ingest scripts overwrite the Volume Parquet,
-the Databricks job MERGEs bronze/gold. Schedule: daily at 06:00 UTC.
+the Databricks job MERGEs bronze/gold. Schedule: daily at 07:17 UTC.
     """,
 ) as dag:
     ingest_firms = BashOperator(
