@@ -266,8 +266,8 @@ def main() -> None:
         )
     else:
         today = date.today() - timedelta(days=DATA_LAG_DAYS)
-        start_date = today - timedelta(days=LOOKBACK_DAYS - 1)
-        end_date = today
+        start_date = today - timedelta(days=LOOKBACK_DAYS)
+        end_date = today + timedelta(days=1)
         viirs_sources = VIIRS_SOURCES
         product_type = "SP (archive)" if DATA_LAG_DAYS > 10 else "NRT"
         lag_note = f"  (lag={DATA_LAG_DAYS}d, real date {date.today()})" if DATA_LAG_DAYS else ""
