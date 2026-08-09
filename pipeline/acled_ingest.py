@@ -80,8 +80,30 @@ def _get_token() -> str:
         },
         timeout=(10, 30),
     )
-    resp.raise_for_status()
-    return resp.json()["access_token"]
+    try:
+        resp.raise_for_status()
+    except requests.HTTPError:
+        print(f"ACLED token request failed: HTTP {resp.status_code}")
+        print(f"Response headers: {dict(resp.headers)}")
+        print(f"Response body: {resp.text[:1000]}")
+        raise
+
+    try:
+        payload = resp.json()
+    except requests.exceptions.JSONDecodeError:
+        print("ACLED token endpoint returned non-JSON response.")
+        print(f"HTTP status: {resp.status_code}")
+        print(f"Content-Type: {resp.headers.get('Content-Type')}")
+        print(f"Response body: {resp.text[:1000]}")
+        raise
+
+    if "access_token" not in payload:
+        raise RuntimeError(
+            f"ACLED token response did not contain access_token. "
+            f"Response keys: {list(payload.keys())}"
+        )
+
+    return payload["access_token"]
 
 
 # -- Fetch ---------------------------------------------------------------------

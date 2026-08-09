@@ -21,13 +21,29 @@ jobs:
           cache: pip
       - run: pip install -r requirements.txt
       - name: Fetch FIRMS detections -> UC Volume
-        run: python pipeline/firms_ingest.py
         env:
           FIRMS_MAP_KEY: ${{ secrets.FIRMS_MAP_KEY }}
           DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
           DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
           DATABRICKS_VOLUME_PATH: ${{ secrets.DATABRICKS_VOLUME_PATH }}
           DATA_LAG_DAYS: 364
+        run: |
+          for attempt in 1 2 3; do
+            echo "FIRMS ingest attempt $attempt/3"
+
+            if python pipeline/firms_ingest.py; then
+              echo "FIRMS ingest succeeded"
+              exit 0
+            fi
+
+            if [ "$attempt" -lt 3 ]; then
+              echo "FIRMS ingest failed. Retrying in 120 seconds..."
+              sleep 120
+            fi
+          done
+
+          echo "FIRMS ingest failed after 3 attempts"
+          exit 1
 
   ingest-acled:
     runs-on: ubuntu-latest
@@ -39,7 +55,6 @@ jobs:
           cache: pip
       - run: pip install -r requirements.txt
       - name: Fetch ACLED strike events -> UC Volume
-        run: python pipeline/acled_ingest.py
         env:
           ACLED_USERNAME: ${{ secrets.ACLED_USERNAME }}
           ACLED_PASSWORD: ${{ secrets.ACLED_PASSWORD }}
@@ -47,6 +62,23 @@ jobs:
           DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
           DATABRICKS_VOLUME_PATH: ${{ secrets.DATABRICKS_VOLUME_PATH }}
           DATA_LAG_DAYS: 364
+        run: |
+          for attempt in 1 2 3; do
+            echo "ACLED ingest attempt $attempt/3"
+
+            if python pipeline/acled_ingest.py; then
+              echo "ACLED ingest succeeded"
+              exit 0
+            fi
+
+            if [ "$attempt" -lt 3 ]; then
+              echo "ACLED ingest failed. Retrying in 120 seconds..."
+              sleep 120
+            fi
+          done
+
+          echo "ACLED ingest failed after 3 attempts"
+          exit 1
 
   # ── Transform -> Export -> Validate -> Publish ───────────────────────────────
   run-pipeline:
