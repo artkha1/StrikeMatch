@@ -802,8 +802,9 @@
 // ────────────────────────────────────────────────────────────────
 // Config
 // ────────────────────────────────────────────────────────────────
-const DATA_URL     = './data/events.json';
-const METADATA_URL = './data/metadata.json';
+const DATA_URL       = './data/events.json';
+const METADATA_URL   = './data/metadata.json';
+const CARTO_API_KEY  = 'cb1_2dps_1_0bcb7dc3ecde403025f69bfb';
 
 // Theater extents (lat_min, lat_max, lon_min, lon_max — union of the ingest
 // bboxes in pipeline/firms_ingest.py) and comfortable map views for each.
@@ -841,7 +842,7 @@ var map = L.map('map', { center: [38, 38], zoom: 5, zoomControl: false });
 
 L.control.zoom({ position: 'bottomleft' }).addTo(map);
 
-L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+L.tileLayer(`https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png?key=${CARTO_API_KEY}`, {
   attribution: '&copy; <a href="https://carto.com/">CARTO</a> &copy; <a href="https://www.openstreetmap.org/copyright">OSM</a>',
   subdomains: 'abcd',
   maxZoom: 18,
