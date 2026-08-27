@@ -94,7 +94,7 @@ def _column_checks_ge(df: pd.DataFrame, has_ids: bool) -> list[str]:
     suite = gx.ExpectationSuite(name="gold_export")
     if has_ids:
         suite.add_expectation(gxe.ExpectColumnValuesToBeUnique(column="global_event_id"))  # provided by ACLED
-        # TODO: not really a reason to do this, this just verifying ACLED isn't lying
+        # TODO: not really a reason to do this, this is just verifying ACLED isn't lying
         # In a future release, the above check could be dropped anf global_event_id doesn't have to be exported altogether, remove the BRONZE joining in view serving in spark job
         suite.add_expectation(gxe.ExpectColumnValuesToBeUnique(column="acled_event_id"))  # hashed global_event_id
         suite.add_expectation(gxe.ExpectColumnValuesToNotBeNull(column="global_event_id"))

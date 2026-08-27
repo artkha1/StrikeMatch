@@ -98,19 +98,32 @@ jobs:
           DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
           DATABRICKS_JOB_ID: ${{ secrets.DATABRICKS_JOB_ID }}
         run: |
-          RUN_ID=$(curl -sf -X POST "$DATABRICKS_HOST/api/2.1/jobs/run-now" \
+          HTTP_STATUS=$(curl -s -X POST "$DATABRICKS_HOST/api/2.1/jobs/run-now" \
             -H "Authorization: Bearer $DATABRICKS_TOKEN" \
             -H "Content-Type: application/json" \
-            -d "{\"job_id\": $DATABRICKS_JOB_ID}" | jq -r '.run_id')
+            -d "{\"job_id\": $DATABRICKS_JOB_ID}" \
+            -w "%{http_code}" -o /tmp/run-now.json)
+          if [ "$HTTP_STATUS" -lt 200 ] || [ "$HTTP_STATUS" -ge 300 ]; then
+            echo "run-now failed: HTTP $HTTP_STATUS"
+            cat /tmp/run-now.json
+            exit 1
+          fi
+          RUN_ID=$(jq -r '.run_id' /tmp/run-now.json)
           echo "Triggered Databricks run $RUN_ID"
           while true; do
-            RESPONSE=$(curl -sf "$DATABRICKS_HOST/api/2.1/jobs/runs/get?run_id=$RUN_ID" \
-              -H "Authorization: Bearer $DATABRICKS_TOKEN")
-            STATE=$(echo "$RESPONSE" | jq -r '.state.life_cycle_state')
-            RESULT=$(echo "$RESPONSE" | jq -r '.state.result_state // empty')
+            HTTP_STATUS=$(curl -s "$DATABRICKS_HOST/api/2.1/jobs/runs/get?run_id=$RUN_ID" \
+              -H "Authorization: Bearer $DATABRICKS_TOKEN" \
+              -w "%{http_code}" -o /tmp/runs-get.json)
+            if [ "$HTTP_STATUS" -lt 200 ] || [ "$HTTP_STATUS" -ge 300 ]; then
+              echo "runs/get failed: HTTP $HTTP_STATUS"
+              cat /tmp/runs-get.json
+              exit 1
+            fi
+            STATE=$(jq -r '.state.life_cycle_state' /tmp/runs-get.json)
+            RESULT=$(jq -r '.state.result_state // empty' /tmp/runs-get.json)
             echo "  state=$STATE result=$RESULT"
             if [ "$STATE" = "TERMINATED" ]; then
-              [ "$RESULT" = "SUCCESS" ] || { echo "Databricks job failed: $RESULT"; exit 1; }
+              [ "$RESULT" = "SUCCESS" ] || { echo "Databricks job failed: $RESULT"; cat /tmp/runs-get.json; exit 1; }
               break
             fi
             sleep 30
