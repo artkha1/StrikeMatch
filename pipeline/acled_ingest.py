@@ -110,46 +110,59 @@ def _get_token() -> str:
 
 
 def _fetch_page(
-    token: str, country: str, since: str, until: str, page: int, retries: int = 3, backoff: int = 30
-) -> list[dict]:
+    token: str,
+    country: str,
+    since: str,
+    until: str,
+    cursor: int | None = None,
+    retries: int = 3,
+    backoff: int = 30,
+) -> tuple[list[dict], int | None]:
+    """Return (rows, next_cursor). ACLED replaced `page` with cursor pagination."""
+    params = {
+        "_format": "json",
+        "country": country,
+        "event_type": "Explosions/Remote violence",
+        "event_date": f"{since}|{until}",
+        "event_date_where": "BETWEEN",
+        "limit": PAGE_SIZE,
+    }
+    if cursor is not None:
+        params["cursor"] = cursor
     for attempt in range(1, retries + 1):
         try:
             resp = requests.get(
                 ACLED_READ_URL,
                 headers={"Authorization": f"Bearer {token}"},
-                params={
-                    "_format": "json",
-                    "country": country,
-                    "event_type": "Explosions/Remote violence",
-                    "event_date": f"{since}|{until}",
-                    "event_date_where": "BETWEEN",
-                    "limit": PAGE_SIZE,
-                    "page": page,
-                },
+                params=params,
                 timeout=(10, 60),
             )
+            if resp.status_code == 400:  # not retryable; surface ACLED's message
+                print(f"ACLED 400 response body: {resp.text[:500]}")
             resp.raise_for_status()
-            return resp.json().get("data", [])
+            body = resp.json()
+            return body.get("data", []), body.get("next_cursor")
         except (requests.RequestException, TimeoutError, ValueError) as exc:
-            if attempt == retries:
+            if attempt == retries or (
+                isinstance(exc, requests.HTTPError) and exc.response.status_code == 400
+            ):
                 raise
-            print(f"  [retry {attempt}/{retries} {country} p{page}: {exc}]", flush=True)
+            print(f"  [retry {attempt}/{retries} {country} cursor={cursor}: {exc}]", flush=True)
             time.sleep(backoff)
-    return []  # unreachable
+    return [], None  # unreachable
 
 
 def _fetch_all(token: str, since: str, until: str) -> list[dict]:
     all_rows: list[dict] = []
     for country in ACLED_COUNTRIES:
-        page = 1
+        cursor = None
         country_total = 0
         while True:
-            rows = _fetch_page(token, country, since, until, page)
+            rows, cursor = _fetch_page(token, country, since, until, cursor)
             all_rows.extend(rows)
             country_total += len(rows)
-            if len(rows) < PAGE_SIZE:  # last page reached
+            if not rows or not cursor or len(rows) < PAGE_SIZE:  # last page reached
                 break
-            page += 1
         print(f"  {country}: {country_total:,}  (cumulative: {len(all_rows):,})", flush=True)
     return all_rows
 

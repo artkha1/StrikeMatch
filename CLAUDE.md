@@ -26,7 +26,8 @@ FIRMS SP archive products cover any date, with no embargo.
   → `access_token` (24 h; refresh 14 d). Send `Authorization: Bearer {token}` on reads.
 - **Read:** `GET https://acleddata.com/api/acled/read?_format=json` with filters
   `country=Ukraine|Russia|Syria|...`, `event_type=Explosions/Remote violence`,
-  `event_date={yyyy-mm-dd}&event_date_where=>`; paginate 5000 rows/call.
+  `event_date={yyyy-mm-dd}&event_date_where=>`; paginate 5000 rows/call with **cursor** pagination
+  (`page` is rejected with HTTP 400): omit `cursor` on the first call, then pass the response's `next_cursor`.
 - **Strike filter:** `sub_event_type` ∈ {Air/drone strike, Shelling/artillery/missile attack}; `geo_precision` 1–2 only.
 - **Credentials:** `ACLED_USERNAME` / `ACLED_PASSWORD` in `.env` — never hardcode or commit.
 
